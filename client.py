@@ -1,7 +1,6 @@
 import socket
 import threading
 import socketserver
-from tracemalloc import stop
 
 def recv_all(sock: socket.socket, block_size: int = 1024) -> bytes:
         data = b""
