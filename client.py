@@ -26,8 +26,12 @@ def client(ip: str, port: int, username: str):
             try:
                 while not stop_event.is_set():
                     message = str(recv_all(sock), "utf-8")
-                    print(message)
+                    print("\n" + message)
             except Exception as e:
+                if stop_event.is_set():
+                    print("Disconnected, closing...")
+                else:
+                    print("Lost connection, closing...")
                 stop_event.set()
         
         t = threading.Thread(target=listener)
@@ -40,6 +44,8 @@ def client(ip: str, port: int, username: str):
                 sock.sendall(bytes(message, 'utf-8'))
         except KeyboardInterrupt:
             stop_event.set()
+        except:
+            pass
 
 
 ip = "127.0.0.1"

@@ -40,17 +40,22 @@ class Server:
                 message = recv_all(sock)
             except Exception as e:
                 print(f"[!] Error: {e}")
-                client = self.clients[sock]
-                del self.clients[sock]
-                self.send_to_all(f"[-] {client.username} has disconnected.".encode("utf-8"))
+                self.disconnect(sock)
                 break
-            print(message)
+
             client = self.clients[sock]
-            self.send_to_all(f"{client.username}: {message.decode('utf-8')}".encode('utf-8'))
+            self.send_to_all(f"<{client.username}> {message.decode('utf-8')}".encode('utf-8'))
     
+    def disconnect(self, sock: socket.socket):
+        client = self.clients[sock]
+        del self.clients[sock]
+        self.send_to_all(f"[-] {client.username} has disconnected.".encode("utf-8"))
+
     def send_to_all(self, data):
-        for s, client in self.clients.items():
-            try_send(s, data)
+        for s in list(self.clients.keys()):
+            success = try_send(s, data)
+            if not success:
+                self.disconnect(s)
     
     def list_users(self) -> List[str]:
         return [c.username for c in self.clients.values()]
@@ -73,12 +78,13 @@ class Server:
             pass
     
     def close(self):
-        self.server_sock.close()
+        self.send_to_all("Server closed.".encode("utf-8"))
         for s in list(self.clients.keys()):
             client = self.clients[s]
             s.close()
             client.thread.join()
         
+        self.server_sock.close()
         self.clients.clear()
 
 def main():
