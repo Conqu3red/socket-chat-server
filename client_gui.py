@@ -3,8 +3,10 @@ import socket
 import threading
 import json
 import os
+import binascii
 import dh
 from typing import *
+from Crypto.Cipher import AES
 
 ip = "192.168.48.1"
 port = 6777
@@ -121,8 +123,7 @@ class Client:
                     data = dec_json(recv_all(sock))
                     output = self.window["output"]
                     if data["type"] == "message_forward":
-                        print(f"<{data['name']}> {data['message']}")
-                        output.print(f"<{data['name']}> {data['message']}")
+                        self.receive_message(data)
                     
                     elif data["type"] == "user_connect":
                         print(f"[+] {data['name']} has connected.")
@@ -149,7 +150,10 @@ class Client:
                         shared_key = me.gen_shared_key(other_public_key)
                         print(f"Shared key: {shared_key}")
 
-                        self.key_data["negotiations"][other_name] = {"public_key": data["public_key"]}
+                        self.key_data["negotiations"][other_name] = {
+                            "public_key": data["public_key"],
+                            "shared_key": shared_key
+                        }
 
                         if other_name not in self.open_conversations:
                             self.open_conversations.append(other_name)
@@ -172,6 +176,23 @@ class Client:
 
         return sock
     
+    def receive_message(self, data: Dict[str, any]):
+        target: str = data["name"]
+        if target in self.key_data["negotiations"]:
+            shared_key = binascii.unhexlify(self.key_data["negotiations"][target]["shared_key"])
+            nonce = binascii.unhexlify(data["message"]["nonce"])
+            
+            cipher = AES.new(shared_key, AES.MODE_EAX, nonce)
+            
+            message = cipher.decrypt_and_verify(
+                binascii.unhexlify(data["message"]["ciphertext"]),
+                binascii.unhexlify(data["message"]["tag"])
+            ).decode("utf-8")
+            
+            print(f"<{data['name']}> {message}")
+            self.window["output"].print(f"<{data['name']}> {message}")
+
+    
     def negotiate_key(self, other_username: str):
         self.sock.sendall(enc_json({
             "type": "conversation_request",
@@ -186,6 +207,24 @@ class Client:
         new_layout = [[sg.Radio(name, "open_conversation_btns", enable_events=True, key=lambda: open_conv(name))] for name in self.open_conversations]
         self.window.extend_layout(self.window["open_conversations"], new_layout)
 
+    def try_send_message(self, message: str, target: str):
+        # TODO: send to correct person
+        self.window["output"].print(f"<{self.username}> {message}")
+        if target in self.key_data["negotiations"]:
+            shared_key = binascii.unhexlify(self.key_data["negotiations"][target]["shared_key"])
+            
+            cipher = AES.new(shared_key, AES.MODE_EAX)
+            ciphertext, tag = cipher.encrypt_and_digest(message.encode("utf-8"))
+            
+            self.sock.sendall(enc_json({
+                "type": "message",
+                "name": target,
+                "message": {
+                    "nonce": cipher.nonce.hex(),
+                    "ciphertext": ciphertext.hex(),
+                    "tag": tag.hex()
+                }
+            }))
     
     def mainloop(self):
         while True:
@@ -196,13 +235,7 @@ class Client:
                 self.negotiate_key(values["n_user"])
             if event == "Send":
                 if self.currently_messaging is not None:
-                    # TODO: send to correct person
-                    self.window["output"].print(f"<{self.username}> {values['message']}")
-                    self.sock.sendall(enc_json({
-                        "type": "message",
-                        "name": self.currently_messaging,
-                        "message": values["message"]
-                    }))
+                    self.try_send_message(values["message"], self.currently_messaging)
             
             if callable(event):
                 event()
