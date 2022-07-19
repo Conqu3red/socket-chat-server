@@ -114,7 +114,7 @@ def client(ip: str, port: int, username: str):
 my_server = True
 
 if my_server:
-    ip = "172.16.44.141"
+    ip = "192.168.48.1" #"172.16.44.141"
     port = 6777
 else:
     ip = "172.16.55.127"

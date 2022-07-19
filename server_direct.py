@@ -9,7 +9,7 @@ import json
 
 DATETIME_FMT = "%Y-%m-%d %H:%M:%S"
 FORMAT = '[%(asctime)s %(levelname)s %(module)s:%(lineno)d] %(message)s'
-logging.basicConfig(format=FORMAT, datefmt=DATETIME_FMT, level=logging.INFO)
+logging.basicConfig(format=FORMAT, datefmt=DATETIME_FMT, level=logging.DEBUG)
 logger = logging.getLogger('tcp_server')
 
 @dataclass
@@ -72,8 +72,12 @@ class Server:
 
         while not stop_event.is_set():
             try:
-                data = dec_json(recv_all(sock))
+                raw = recv_all(sock)
+                logger.debug(f"data: {raw}")
+                data = dec_json(raw)
                 if data["type"] == "message":
+                    other_username = data["name"]
+                    other_sock = self.get_sock(other_username) # TODO: hashmap lookup
                     if other_sock is not None:
                         client = self.clients[sock][1]
                         message = data["message"]
