@@ -12,3 +12,7 @@ def x25519_keygen_private() -> bytes:
 def x25519_keygen_public(sk: bytes) -> bytes:
     """ Generate public key from private key `sk` """
     return x25519.scalar_base_mult(sk)
+
+def x25519_shared_secret(sk1: bytes, pk2: bytes) -> bytes:
+    """ `sk1` * `pk2` where `sk1` is a private key and `pk2` is a public key  """
+    x25519.scalar_mult(sk1, pk2)

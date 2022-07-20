@@ -29,4 +29,4 @@ def KDF(KM: bytes, info: bytes = b"") -> bytes:
     """run HKDF algorithm in `KM` (Key Material) with `info`"""
     # this code assumes the x25519 curve
     F = bytes([0xFF] * 32)
-    return hkdf(32, ikm = F + KM, salt = bytes([0] * 32), info = info) 
+    return hkdf(32, ikm = F + KM, salt = bytes([0] * 32), info = info)

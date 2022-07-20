@@ -1,10 +1,17 @@
 import hashlib
 import x25519
 from .kdf import KDF
-from .utils import x25519_clamp, x25519_keygen_private, x25519_keygen_public
+from .utils import (
+    x25519_clamp,
+    x25519_keygen_private,
+    x25519_keygen_public,
+    x25519_shared_secret,
+)
 
-def DH(sk1: bytes, pk2: bytes) -> bytes:
-    return x25519.scalar_mult(sk1, pk2)
+def x25519_dh_gen_shared_key(sk1: bytes, pk2: bytes) -> bytes:
+    """ Returns KDF(`sk1` * `pk2`) where sk1 is your private key and pk2 is the other party's public key"""
+    shared_secret = x25519_shared_secret(sk1, pk2)
+    return KDF(shared_secret)
 
 
 class DiffieHellman:
@@ -27,10 +34,7 @@ class DiffieHellman:
 
     def gen_shared_key(self, other_key: bytes) -> bytes:
         """ Return abG mod p """
-        shared_key = DH(self.__a, other_key)
-        #print("Generated shared key:", shared_key)
-
-        return KDF(shared_key)
+        return x25519_dh_gen_shared_key(self.__a, other_key)
 
     def save(self):
         return {
