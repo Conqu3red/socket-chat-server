@@ -1,5 +1,4 @@
-import hashlib
-import x25519
+from typing import Optional
 from .kdf import KDF
 from .utils import (
     x25519_clamp,
@@ -8,40 +7,24 @@ from .utils import (
     x25519_shared_secret,
 )
 
-def x25519_dh_gen_shared_key(sk1: bytes, pk2: bytes) -> bytes:
-    """ Returns KDF(`sk1` * `pk2`) where sk1 is your private key and pk2 is the other party's public key"""
+
+def x25519_gen_shared_key(sk1: bytes, pk2: bytes) -> bytes:
+    """
+    Generates a shared secret and passes it through the key derivation function.
+    
+    Shared secret is computed from your private key `sk1` and the other party's public key `pk2`
+    """
     shared_secret = x25519_shared_secret(sk1, pk2)
     return KDF(shared_secret)
 
 
-class DiffieHellman:
-    """ Class to represent the Diffie-Hellman key exchange protocol using X25519 Elliptic Curve """
-
-    # Current minimum recommendation is 2048 bit.
-    def __init__(self, private: bytes = None):
-        if private is not None:
-            self.__a = x25519_clamp(private)
+class X25519KeyPair:
+    """ Class for a key pair on the X25519 Elliptic Curve """
+    
+    def __init__(self, sk: Optional[bytes] = None):
+        if sk is not None:
+            self.sk = x25519_clamp(sk)
         else:
-            self.__a = x25519_keygen_private()
-
-    def get_private_key(self) -> bytes:
-        """ Return the private key (a) """
-        return self.__a
-
-    def gen_public_key(self) -> bytes:
-        """ Return aG mod p """
-        return x25519_keygen_public(self.__a)
-
-    def gen_shared_key(self, other_key: bytes) -> bytes:
-        """ Return abG mod p """
-        return x25519_dh_gen_shared_key(self.__a, other_key)
-
-    def save(self):
-        return {
-            "private": self.__a.hex(),
-        }
-
-    @classmethod
-    def load(cls, data: dict):
-        c = cls(private=bytes.fromhex(data["private"]))
-        return c
+            self.sk = x25519_keygen_private()
+        
+        self.pk = x25519_keygen_public(self.sk)

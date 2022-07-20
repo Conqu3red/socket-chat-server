@@ -101,13 +101,15 @@ class Client:
                 print("Loaded existing key.")
         except (OSError, json.JSONDecodeError) as e:
             print(e)
-            me = dh.DiffieHellman()
+            k = dh.X25519KeyPair() # key pair
             self.key_data = {
-                "mine": me.save(),
+                "mine": {
+                    "private": k.sk.hex()
+                },
                 "negotiations": {}
             }
 
-        me = dh.DiffieHellman.load(self.key_data["mine"])
+        k = dh.X25519KeyPair(sk=bytes.fromhex(self.key_data["mine"]["private"]))
 
         with open(self.DATA_FILE, "w") as f:
             json.dump(self.key_data, f, indent=2)
@@ -119,7 +121,7 @@ class Client:
         sock.sendall(enc_json({
             "type": "client_init",
             "username": self.username,
-            "public_key": me.gen_public_key().hex()
+            "public_key": k.pk.hex()
         }))
 
         print("Connected.")
@@ -156,7 +158,7 @@ class Client:
                         print(f"conversation {data}")
                         other_name = data["name"]
                         other_public_key = data["public_key"]
-                        shared_key = me.gen_shared_key(bytes.fromhex(other_public_key))
+                        shared_key = dh.x25519_shared_secret(k.sk, bytes.fromhex(other_public_key))
                         print(f"Shared key: {shared_key}")
 
                         self.key_data["negotiations"][other_name] = {

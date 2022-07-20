@@ -13,6 +13,7 @@ def Sign(k: bytes, M: bytes, Z: Optional[bytes] = None) -> bytes:
     curve = XEdDSA25519(mont_priv=k)
     return curve.sign(data=M, nonce=Z)
 
+
 def Verify(u: bytes, M: bytes, R_s: bytes) -> bool:
     """
     u : Montgomery public key (byte sequence of b bits)
