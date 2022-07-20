@@ -4,11 +4,11 @@ import threading
 import json
 import os
 import binascii
-import dh
+from x3dh import dh
 from typing import *
 from Crypto.Cipher import AES
 
-ip = "172.16.41.115"
+ip = "192.168.1.12"
 port = 6777
 
 sg.theme('DarkAmber')  # Add a touch of color
@@ -119,7 +119,7 @@ class Client:
         sock.sendall(enc_json({
             "type": "client_init",
             "username": self.username,
-            "public_key": me.gen_public_key_hex()
+            "public_key": me.gen_public_key().hex()
         }))
 
         print("Connected.")
@@ -156,12 +156,12 @@ class Client:
                         print(f"conversation {data}")
                         other_name = data["name"]
                         other_public_key = data["public_key"]
-                        shared_key = me.gen_shared_key(binascii.unhexlify(other_public_key))
+                        shared_key = me.gen_shared_key(bytes.fromhex(other_public_key))
                         print(f"Shared key: {shared_key}")
 
                         self.key_data["negotiations"][other_name] = {
                             "public_key": data["public_key"],
-                            "shared_key": shared_key
+                            "shared_key": shared_key.hex()
                         }
 
                         if other_name not in self.open_conversations:
@@ -188,14 +188,14 @@ class Client:
     def receive_message(self, data: Dict[str, any]):
         target: str = data["name"]
         if target in self.key_data["negotiations"]:
-            shared_key = binascii.unhexlify(self.key_data["negotiations"][target]["shared_key"])
-            nonce = binascii.unhexlify(data["message"]["nonce"])
+            shared_key = bytes.fromhex(self.key_data["negotiations"][target]["shared_key"])
+            nonce = bytes.fromhex(data["message"]["nonce"])
 
             cipher = AES.new(shared_key, AES.MODE_EAX, nonce)
 
             message = cipher.decrypt_and_verify(
-                binascii.unhexlify(data["message"]["ciphertext"]),
-                binascii.unhexlify(data["message"]["tag"])
+                bytes.fromhex(data["message"]["ciphertext"]),
+                bytes.fromhex(data["message"]["tag"])
             ).decode("utf-8")
 
             print(f"<{data['name']}> {message}")
@@ -220,7 +220,7 @@ class Client:
         # TODO: send to correct person
         self.window["output"].print(f"<{self.username}> {message}")
         if target in self.key_data["negotiations"]:
-            shared_key = binascii.unhexlify(self.key_data["negotiations"][target]["shared_key"])
+            shared_key = bytes.fromhex(self.key_data["negotiations"][target]["shared_key"])
 
             cipher = AES.new(shared_key, AES.MODE_EAX)
             ciphertext, tag = cipher.encrypt_and_digest(message.encode("utf-8"))
