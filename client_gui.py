@@ -2,9 +2,8 @@ import PySimpleGUI as sg
 import socket
 import threading
 import json
-import os
-import binascii
 from x3dh import dh
+from x3dh.curve25519 import x25519
 from typing import *
 from Crypto.Cipher import AES
 
@@ -101,7 +100,7 @@ class Client:
                 print("Loaded existing key.")
         except (OSError, json.JSONDecodeError) as e:
             print(e)
-            k = dh.X25519KeyPair() # key pair
+            k = x25519.X25519KeyPair() # key pair
             self.key_data = {
                 "mine": {
                     "private": k.sk.hex()
@@ -109,7 +108,7 @@ class Client:
                 "negotiations": {}
             }
 
-        k = dh.X25519KeyPair(sk=bytes.fromhex(self.key_data["mine"]["private"]))
+        k = x25519.X25519KeyPair(sk=bytes.fromhex(self.key_data["mine"]["private"]))
 
         with open(self.DATA_FILE, "w") as f:
             json.dump(self.key_data, f, indent=2)
@@ -158,7 +157,7 @@ class Client:
                         print(f"conversation {data}")
                         other_name = data["name"]
                         other_public_key = data["public_key"]
-                        shared_key = dh.x25519_shared_secret(k.sk, bytes.fromhex(other_public_key))
+                        shared_key = dh.x25519_gen_shared_key(k.sk, bytes.fromhex(other_public_key))
                         print(f"Shared key: {shared_key}")
 
                         self.key_data["negotiations"][other_name] = {

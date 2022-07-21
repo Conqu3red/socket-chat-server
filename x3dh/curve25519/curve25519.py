@@ -1,19 +1,9 @@
-import os
+from .utils import decodeLittleEndian, encodeLittleEndian
 from typing import Tuple
 
-# https://www.ietf.org/rfc/rfc7748.txt (page 8-9)
 p = (2 ** 255) - 19
 bits = 256 # curve 25519
 a24 = (486662 - 2) // 4 # 121665
-
-
-def decodeLittleEndian(b: int, bits: int) -> bytes:
-    return sum([b[i] << 8 * i for i in range((bits + 7) // 8)])
-
-
-def encodeLittleEndian(n: int, bits: int):
-    return bytes([(n >> 8 * i) & 0xff for i in range((bits + 7) // 8)])
-
 
 def decodeUCoordinate(u: bytes, bits: int) -> int:
     u_list = [b for b in u]
@@ -38,10 +28,11 @@ def cswap(swap: int, x_2: int, x_3: int) -> Tuple[int, int]:
 
 def scalar_mult(k: bytes, u: bytes) -> bytes:
     """
-    Multiply the point u on the x25519 elliptic curve by the scalar k
+    Multiply the u-coordinate of a point on the Montgomery curve (curve25519) by the scalar k.
+    
     Args:
         k : scalar value
-        u : coordinate
+        u : u-coordinate of a point on the Montgomery curve (curve25519)
     """
     _k = decodeLittleEndian(k, bits)
     _u = decodeUCoordinate(u, bits)
@@ -85,27 +76,3 @@ def scalar_mult(k: bytes, u: bytes) -> bytes:
 def scalar_base_mult(k: bytes) -> bytes:
     """ multiply the base point (u=9) by the constant k """
     return scalar_mult(k, BASE_POINT)
-
-
-def clamp(sk: bytes) -> bytes:
-    """ Clamp a x25519 private key """
-    mut = bytearray(sk)
-    mut[0] &= 248 # unset the 3 least significant bits
-    mut[31] &= 127 # unset the most significant bit
-    mut[31] |= 64 # set the second most significant bit
-    return bytes(mut)
-
-
-def keygen_private() -> bytes:
-    """ Generate new x25519 private key """
-    return clamp(os.urandom(32))
-
-
-def keygen_public(sk: bytes) -> bytes:
-    """ Generate public key from private key `sk` """
-    return scalar_base_mult(sk)
-
-
-def shared_secret(sk1: bytes, pk2: bytes) -> bytes:
-    """ `sk1` * `pk2` where `sk1` is a private key and `pk2` is a public key  """
-    return scalar_mult(sk1, pk2)

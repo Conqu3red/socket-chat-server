@@ -1,7 +1,7 @@
-from x3dh.dh import X25519KeyPair
-from x3dh.x25519 import scalar_mult, shared_secret
+from x3dh.curve25519.curve25519 import scalar_mult
+from x3dh.curve25519.x25519 import X25519, X25519KeyPair
 
 alice = X25519KeyPair()
 bob = X25519KeyPair()
-print(f"Shared: {shared_secret(alice.sk, bob.pk).hex()}")
+print(f"Shared: {X25519(alice.sk, bob.pk).hex()}")
 print(f"Shared: {scalar_mult(alice.sk, bob.pk).hex()}")

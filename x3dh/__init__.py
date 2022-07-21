@@ -1,1 +1,1 @@
-from . import dh, kdf, sig, x25519
+from . import dh, kdf, sig, curve25519
