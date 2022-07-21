@@ -1,1 +1,1 @@
-from . import dh, kdf, sig, utils
+from . import dh, kdf, sig, x25519

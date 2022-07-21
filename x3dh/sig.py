@@ -17,9 +17,7 @@ def Sign(k: bytes, M: bytes, Z: Optional[bytes] = None) -> bytes:
 def Verify(u: bytes, M: bytes, R_s: bytes) -> bool:
     """
     u : Montgomery public key (byte sequence of b bits)
-    
     M : Message to verify (byte sequence)
-    
     R_s : Signature to verify (byte sequence of 2b bits)
     """
     curve = XEdDSA25519(mont_pub=u)

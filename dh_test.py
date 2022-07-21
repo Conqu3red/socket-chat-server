@@ -1,10 +1,10 @@
-from x3dh.dh import DiffieHellman
+from x3dh.dh import X25519KeyPair, x25519_gen_shared_key
 
-alice = DiffieHellman()
-bob = DiffieHellman()
+alice = X25519KeyPair()
+bob = X25519KeyPair()
 
-alice_shared = alice.gen_shared_key(bob.gen_public_key())
-bob_shared = bob.gen_shared_key(alice.gen_public_key())
+alice_shared = x25519_gen_shared_key(alice.sk, bob.pk)
+bob_shared = x25519_gen_shared_key(bob.sk, alice.pk)
 
 print(f"Alice shared key: {alice_shared.hex()}")
 print(f"Bob shared key: {bob_shared.hex()}")
