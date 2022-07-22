@@ -1,4 +1,4 @@
-def decodeLittleEndian(b: int, bits: int) -> bytes:
+def decodeLittleEndian(b: bytes, bits: int) -> int:
     return sum([b[i] << 8 * i for i in range((bits + 7) // 8)])
 
 

@@ -26,6 +26,8 @@ def cswap(swap: int, x_2: int, x_3: int) -> Tuple[int, int]:
     return (x_3, x_2) if swap else (x_2, x_3)
 
 
+# TODO: break down this implementation
+# from rfc7748 section 5
 def scalar_mult(k: bytes, u: bytes) -> bytes:
     """
     Multiply the u-coordinate of a point on the Montgomery curve (curve25519) by the scalar k.
@@ -53,6 +55,7 @@ def scalar_mult(k: bytes, u: bytes) -> bytes:
         (z_2, z_3) = cswap(swap, z_2, z_3)
         swap = k_t
 
+        # mladd-1987-m
         A = (x_2 + z_2) % p
         AA = pow(A, 2, p)
         B = (x_2 - z_2) % p
