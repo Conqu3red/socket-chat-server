@@ -5,25 +5,18 @@ from .curve25519 import p
 from math import log2, ceil
 
 
-d = 37095705934669439343138083508754565189542113879843219016388785533085940283555
-
 def inv_modp(n: int) -> int:
     return pow(n, p - 2, p)
+
+
+d = -121665 * inv_modp(121666) % p
+q = 2 ** 252 + 27742317777372353535851937790883648493
+q_bits = ceil(log2(q))
 
 
 def u_to_y(u: int) -> int:
     return ((u - 1) * inv_modp(u + 1)) % p
     # mod_inverse replaces division
-    # TODO: should this return value (mod p) or not?
-
-
-def y_to_u(y: int) -> int:
-    return ((1 + y) * inv_modp(1 - y)) % p
-    # mod_inverse replaces division
-
-
-class KeyDecodeException(Exception):
-    pass
 
 
 class TwistedEdwardsPoint:
@@ -32,6 +25,24 @@ class TwistedEdwardsPoint:
     def __init__(self, x: int, y: int):
         self.x = x
         self.y = y
+    
+    def set_sign(self, sign: int):
+        self.x ^= (sign & 1) ^ (self.x & 1)
+    
+    @property
+    def s(self) -> int:
+        return (self.x & 1)
+    
+    @s.setter
+    def s(self, value: int):
+        self.set_sign(value)
+    
+    def on_curve(self) -> bool:
+        xx = (self.x * self.x) % p
+        yy = (self.y * self.y) % p
+        lhs = (-xx + yy) % p
+        rhs = (1 + d * xx * yy) % p
+        return lhs == rhs
     
     @classmethod
     def decompress(cls, data: bytes) -> Optional['TwistedEdwardsPoint']:
@@ -43,7 +54,7 @@ class TwistedEdwardsPoint:
     def decode(cls, y: int) -> Optional['TwistedEdwardsPoint']:
         """ implements decompression defined in rfc7748 section 5.1.3 given an int `y` """
         sign = (y >> 255) & 1 # read sign bit
-        print(f"sign: {sign}")
+        #print(f"sign: {sign}")
         y ^= y & (1 << 255) # clear sign bit
         if y >= p:
             return None # y is larger than p
@@ -78,11 +89,9 @@ class TwistedEdwardsPoint:
     
     def __repr__(self):
         return f"{self.__class__.__name__}(x={self.x}, y={self.y})"
-
-
-TwistedEdwardsPoint.BASE_POINT = TwistedEdwardsPoint.decode(
-    (8 * inv_modp(10)) % p # (u - 1) / (u + 1) where u = 9 (montgomery curve base u)
-)
+    
+    def __eq__(self, other: 'TwistedEdwardsPoint') -> bool:
+        return self.x == other.x and self.y == other.y
 
 
 class HomogeneousPoint:
@@ -91,6 +100,9 @@ class HomogeneousPoint:
         self.Y = Y
         self.Z = Z
         self.T = T
+    
+    def negate(self) -> 'HomogeneousPoint':
+        return HomogeneousPoint(-self.X % p, self.Y, self.Z, -self.T % p)
     
     def add(self, other: 'HomogeneousPoint') -> 'HomogeneousPoint':
         """ returns a new point that is the "addition" of `self` and `other` """
@@ -162,63 +174,36 @@ def set_sign_bit(y: int, s: int) -> int:
 
 
 p_bits = ceil(log2(p))
+rounded_bits = 8 * ceil((p_bits + 1) / 8)
 
 # TODO: wrapper types on points that have util functions on etc
-def convert_mont(u: bytes) -> bytes:
+def convert_mont(u: bytes) -> TwistedEdwardsPoint:
     u_masked = decodeLittleEndian(u, curve25519.bits) % (1 << p_bits)
     y = u_to_y(u_masked)
-    y = set_sign_bit(y, 0)
-    return encodeLittleEndian(y, curve25519.bits)
+    y ^= (y >> 255 & 1) << 255
+    return TwistedEdwardsPoint.decode(y)
+
+TwistedEdwardsPoint.BASE_POINT = TwistedEdwardsPoint.decode(
+    u_to_y(9) # u = 9 (montgomery curve base u)
+)
 
 
-BASE_POINT = convert_mont(curve25519.encodeLittleEndian(9, curve25519.bits))
-d = 37095705934669439343138083508754565189542113879843219016388785533085940283555
+#BASE_POINT = convert_mont(curve25519.encodeLittleEndian(9, curve25519.bits))
 
 # The following functions assume Z_1 = 1
-
-def gf(n: int) -> int:
-    return n % p
-
-# https://eprint.iacr.org/2009/523.pdf
-def add(ym: int, zm: int, yn: int, zn: int):
-    """ Add the projective coordinate (y_m : z_m) to (y_n : z_n) where m > n on Twisted-Edwards curve (Ed25519)"""
-    # all operations are done GF(p)
-    
-    ym_ym = pow(ym, 2, p)
-    zm_zm = pow(zm, 2, p)
-    yn_yn = pow(yn, 2, p)
-    zn_zn = pow(zn, 2, p)
-
-    y_diff = gf(ym - yn)
-    z_diff = gf(zm - zn)
-
-    b1 = gf(ym_ym - zm_zm)
-    b2 = gf(zn_zn - gf(d * yn_yn))
-    p1 = gf(b1 * b2)
-
-    y_m_n = (zm - zn) * ()
-
-
-def scalar_mult(k: bytes, y: bytes) -> bytes:
-    """
-    Multiply the y-coordinate of a point on a Twisted-Edwards curve (Ed25519) by the scalar k.
-    
-    Args:
-        k : scalar value
-        y : y-coordinate of a point on a Twisted-Edwards curve (Ed25519)
-    """
-
-    # BUG: this function does not work at all, maybe the scalar has to be converted to montgomery scalar??
-
-    u = y_to_u(decodeLittleEndian(y, curve25519.bits))
-    k_u = curve25519.scalar_mult(k, encodeLittleEndian(u, curve25519.bits))
-    k_u_masked = decodeLittleEndian(k_u, curve25519.bits) % (1 << p_bits)
-    k_y = u_to_y(k_u_masked)
-    # BUG: does this set sign bit properly??
-    return encodeLittleEndian(k_y, curve25519.bits)
 
 
 def calculate_key_pair(k: bytes) -> Tuple[bytes, bytes]:
     """ Convert a Montgomery private key `k` to a twisted Edwards public key and private key (A, a) respectively"""
+    _k = int.from_bytes(k, "little")
+    E = TwistedEdwardsPoint.BASE_POINT.to_homogeneous().scalar_multiply(_k).to_affine()
+    A = TwistedEdwardsPoint(E.x, E.y)
+    A.s = 0
+    if E.s == 1:
+        a = -_k % q
+    else:
+        a = _k % q
+    
+    return A.compress(), a.to_bytes(32, "little")
 
 # TODO: finish impl

@@ -29,3 +29,17 @@ print(r.y.to_bytes(32, "little").hex())
 print("t:")
 print(TwistedEdwardsPoint.BASE_POINT)
 print(TwistedEdwardsPoint.BASE_POINT.to_homogeneous().to_affine())
+print(TwistedEdwardsPoint.BASE_POINT.on_curve())
+
+from x3dh import xeddsa
+from x3dh.curve25519 import x25519
+sk = x25519.keygen_private()
+pk = x25519.keygen_public(sk)
+
+print("sig stuff:")
+
+message = b"hello"
+sig = xeddsa.sign(sk, message)
+print(f"sig: {sig.hex()}")
+print(xeddsa.verify(pk, message, sig))
+print(xeddsa.verify(pk, message + b"manipulated", sig))
