@@ -21,17 +21,17 @@ test_pk = bytes.fromhex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a6
 _sk = int.from_bytes(sk, "little")
 
 h_r = TwistedEdwardsPoint.BASE_POINT.to_homogeneous().scalar_multiply(_sk)
-r = h_r.to_affine()
+r = h_r.to_actual()
 
 print("result:")
 print(r.y.to_bytes(32, "little").hex())
 
 print("t:")
 print(TwistedEdwardsPoint.BASE_POINT)
-print(TwistedEdwardsPoint.BASE_POINT.to_homogeneous().to_affine())
+print(TwistedEdwardsPoint.BASE_POINT.to_homogeneous().to_actual())
 print(TwistedEdwardsPoint.BASE_POINT.on_curve())
 
-from x3dh import xeddsa
+from x3dh import xed25519
 from x3dh.curve25519 import x25519
 sk = x25519.keygen_private()
 pk = x25519.keygen_public(sk)
@@ -39,7 +39,7 @@ pk = x25519.keygen_public(sk)
 print("sig stuff:")
 
 message = b"hello"
-sig = xeddsa.sign(sk, message)
+sig = xed25519.sign(sk, message)
 print(f"sig: {sig.hex()}")
-print(xeddsa.verify(pk, message, sig))
-print(xeddsa.verify(pk, message + b"manipulated", sig))
+print(xed25519.verify(pk, message, sig))
+print(xed25519.verify(pk, message + b"manipulated", sig))

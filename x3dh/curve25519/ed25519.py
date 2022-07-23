@@ -10,7 +10,7 @@ def inv_modp(n: int) -> int:
 
 
 d = -121665 * inv_modp(121666) % p
-q = 2 ** 252 + 27742317777372353535851937790883648493
+q: int = 2 ** 252 + 27742317777372353535851937790883648493
 q_bits = ceil(log2(q))
 
 
@@ -46,13 +46,13 @@ class TwistedEdwardsPoint:
     
     @classmethod
     def decompress(cls, data: bytes) -> Optional['TwistedEdwardsPoint']:
-        """ implements decompression defined in rfc7748 section 5.1.3 given the raw bytes """
+        """ implements decompression defined in rfc8032 section 5.1.3 given the raw bytes """
         y = int.from_bytes(data, "little")
         return cls.decode(y)
     
     @classmethod
     def decode(cls, y: int) -> Optional['TwistedEdwardsPoint']:
-        """ implements decompression defined in rfc7748 section 5.1.3 given an int `y` """
+        """ implements decompression defined in rfc8032 section 5.1.3 given an int `y` """
         sign = (y >> 255) & 1 # read sign bit
         #print(f"sign: {sign}")
         y ^= y & (1 << 255) # clear sign bit
@@ -126,6 +126,9 @@ class HomogeneousPoint:
 
         # TODO, should this be written as self.__class__?
         return HomogeneousPoint(X3, Y3, Z3, T3)
+    
+    def subtract(self, other: 'HomogeneousPoint') -> 'HomogeneousPoint':
+        return self.add(other.negate())
 
 
     def double(self) -> 'HomogeneousPoint':
@@ -159,7 +162,7 @@ class HomogeneousPoint:
         
         return R0
 
-    def to_affine(self) -> TwistedEdwardsPoint:
+    def to_actual(self) -> TwistedEdwardsPoint:
         inv_z = inv_modp(self.Z)
         return TwistedEdwardsPoint((self.X * inv_z) % p, (self.Y * inv_z) % p)
     
@@ -178,6 +181,7 @@ rounded_bits = 8 * ceil((p_bits + 1) / 8)
 
 # TODO: wrapper types on points that have util functions on etc
 def convert_mont(u: bytes) -> TwistedEdwardsPoint:
+    """ Convert from a Montgomery u-coordinate to a twisted Edwards point """
     u_masked = decodeLittleEndian(u, curve25519.bits) % (1 << p_bits)
     y = u_to_y(u_masked)
     y ^= (y >> 255 & 1) << 255
@@ -196,7 +200,7 @@ TwistedEdwardsPoint.BASE_POINT = TwistedEdwardsPoint.decode(
 def calculate_key_pair(k: bytes) -> Tuple[bytes, bytes]:
     """ Convert a Montgomery private key `k` to a twisted Edwards public key and private key (A, a) respectively"""
     _k = int.from_bytes(k, "little")
-    E = TwistedEdwardsPoint.BASE_POINT.to_homogeneous().scalar_multiply(_k).to_affine()
+    E = TwistedEdwardsPoint.BASE_POINT.to_homogeneous().scalar_multiply(_k).to_actual()
     A = TwistedEdwardsPoint(E.x, E.y)
     A.s = 0
     if E.s == 1:

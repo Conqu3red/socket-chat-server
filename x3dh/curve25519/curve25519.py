@@ -1,7 +1,7 @@
 from .utils import decodeLittleEndian, encodeLittleEndian
 from typing import Tuple
 
-p = (2 ** 255) - 19
+p: int = (2 ** 255) - 19
 bits = 256 # curve 25519
 a24 = (486662 - 2) // 4 # 121665
 

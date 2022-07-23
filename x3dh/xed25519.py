@@ -1,5 +1,13 @@
+"""
+Implemetation of the XEdDSA signature scheme using Curve25519 elliptic curve.
+
+This module allow you to create and verify EdDSA-compatible signatures
+using public key and private key formats initially defined for the X25519
+elliptic curve Diffie-Hellman functions.
+"""
+
 import os
-from .curve25519 import ed25519, curve25519
+from .curve25519 import ed25519
 import hashlib
 from typing import Optional
 
@@ -28,7 +36,7 @@ def sign(k: bytes, M: bytes, Z: Optional[bytes] = None) -> bytes:
 
     A, a = ed25519.calculate_key_pair(k)
     r = hash_i(1, a + M + Z) % ed25519.q
-    R = ed25519.TwistedEdwardsPoint.BASE_POINT.to_homogeneous().scalar_multiply(r).to_affine().compress()
+    R = ed25519.TwistedEdwardsPoint.BASE_POINT.to_homogeneous().scalar_multiply(r).to_actual().compress()
     h = hash_and_decode_int(R + A + M) % ed25519.q
     s = (r + h * int.from_bytes(a, "little")) % ed25519.q
     return R + s.to_bytes(32, "little")
@@ -54,9 +62,9 @@ def verify(u: bytes, M: bytes, R_s: bytes) -> bool:
     
     h = hash_and_decode_int(R.compress() + A.compress() + M) % ed25519.q
     sB = ed25519.TwistedEdwardsPoint.BASE_POINT.to_homogeneous().scalar_multiply(s)
-    negative_hA = A.to_homogeneous().scalar_multiply(h).negate()
-    Rcheck = sB.add(negative_hA).to_affine().compress()
+    hA = A.to_homogeneous().scalar_multiply(h)
+    Rcheck = sB.subtract(hA).to_actual()
     
-    if R.compress() == Rcheck:
+    if R.compress() == Rcheck.compress():
         return True
     return False
