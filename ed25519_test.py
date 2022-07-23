@@ -41,5 +41,9 @@ print("sig stuff:")
 message = b"hello"
 sig = xed25519.sign(sk, message)
 print(f"sig: {sig.hex()}")
-print(xed25519.verify(pk, message, sig))
-print(xed25519.verify(pk, message + b"manipulated", sig))
+print("Verify message with actual signature:", xed25519.verify(pk, message, sig))
+print("Verify modified message:", xed25519.verify(pk, message + b"manipulated", sig))
+
+sk2 = x25519.keygen_private()
+pk2 = x25519.keygen_public(sk2)
+print("Verify with different public key:", xed25519.verify(pk2, message, sig))

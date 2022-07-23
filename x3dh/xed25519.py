@@ -51,6 +51,8 @@ def verify(u: bytes, M: bytes, R_s: bytes) -> bool:
     assert len(R_s) == 64 # bytes
     _u = int.from_bytes(u, "little")
     R = ed25519.TwistedEdwardsPoint.decompress(R_s[:32])
+    if R is None:
+        return False
     s = int.from_bytes(R_s[32:], "little")
     
     if _u >= ed25519.p or R.y >= 1 << ed25519.p_bits or s >= 1 << ed25519.q_bits:
