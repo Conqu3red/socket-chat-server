@@ -1,11 +1,15 @@
+import contextlib
+import os
 import socket
 import threading
 import socketserver
 import time
 from typing import *
 from dataclasses import dataclass
+from locked_resource import locked_resource, modifiable_locked_resource
 import logging
 import json
+import uuid
 
 DATETIME_FMT = "%Y-%m-%d %H:%M:%S"
 FORMAT = '[%(asctime)s %(levelname)s %(module)s:%(lineno)d] %(message)s'
@@ -17,41 +21,134 @@ class Client:
     username: str
 
 
-def enc_json(data) -> bytes:
-    return json.dumps(data).encode("utf-8")
+CONVERSATION_FILE = "data/conversations/{0}.json"
+USER_FILE = "data/users/{0}.json"
 
+def send_packet(socket, data):
+    # format: length.to_bytes(8, "little") <data>
+    if socket is None:
+        raise Exception("Failed to send packet, socket is None.")
+    
+    encoded = json.dumps(data).encode("utf-8")
+    socket.sendall(len(encoded).to_bytes(8, "little") + encoded)
 
-def dec_json(data: bytes):
-    return json.loads(data.decode("utf-8"))
-
-
-def try_send(sock: socket.socket, data) -> bool:
-    try:
-        sock.send(data)
-        return True
-    except Exception as e:
-        logger.error(f"Exception whilst trying to send data: {e}")
-        return False
-
-
-def recv_all(sock: socket.socket, block_size: int = 1024) -> bytes:
-    data = b""
-    while True:
-        new = sock.recv(block_size)
-        data += new
-        if len(new) < block_size:
-            break
-
+def recv_packet(socket):
+    packet_length = int.from_bytes(socket.recv(8), "little")
+    data = json.loads(socket.recv(packet_length).decode("utf-8"))
     return data
+
+def new_conversation_id():
+    while True:
+        id = str(uuid.uuid4())
+        file = CONVERSATION_FILE.format(id)
+        if not os.path.exists(file):
+            return file
+
+
+class ClientHandler:
+    def __init__(self, server: 'Server', socket: socket.socket, username: str):
+        self.server = server
+        self.socket = socket
+        self.username = username
+        self.listener_thread: Optional[threading.Thread] = None
+    
+    def send_packet(self, data):
+        send_packet(self.socket, data)
+
+    def recv_packet(self):
+        return recv_packet(self.socket)
+    
+    def listener(self):
+        user_data = self.server.get_user(self.username)
+        if user_data["keys"] is None:
+            self.send_packet({"type": "request_keys"})
+
+        while not self.server.stop_event.is_set():
+            data = self.recv_packet()
+            print(f"Recieved packet: {data}")
+
+            if data["type"] == "message":
+                self.process_message(data)
+            
+            elif data["type"] == "publish_keys":
+                self.store_published_keys(data)
+
+            elif data["type"] == "get_prekey_bundle":
+                self.fetch_prekey_bundle(data)
+            
+            elif data["type"] == "first_message":
+                self.process_initiator_message(data)
+            
+            else:
+                print(f"Unkown packet type {data['type']!r}")
+    
+    def process_message(self, data):
+        user_data = self.server.get_user(self.username)
+        conversation_id = user_data["conversations"][data["username"]]
+        with self.server.conversation(conversation_id) as conv:
+            conv["messages"].append({
+                "type": "message",
+                "body": data["body"]
+            })
+            self.server.save_conversation(conversation_id, conv)
+    
+        if data["to"] in self.server.cleints:
+            self.server.clients[data["to"]].send_packet(data)
+    
+    def store_published_keys(self, data):
+        with self.server.user(self.username) as user:
+            assert user["keys"] is None
+            user["keys"] = {
+                "ik": data["ik"],
+                "spk": data["spk"],
+                "prekey_sig": data["prekey_sig"],
+                "opks": data["opks"]
+            }
+            self.server.save_user(self.username, user)
+            print(f"Saved keys for {self.username}")
+    
+    def fetch_prekey_bundle(self, data):
+        username = data["username"]
+        with self.server.user(username) as user:
+            # get one-time prekey if available
+            opk_id = None
+            opk = None
+            if len(user["keys"]["opks"]) > 0:
+                opk_id = list(user["keys"]["opks"].keys())[0]
+                opk = user["keys"]["opks"].pop(opk_id)
+
+                print(f"Removed one-time prekey {opk_id} from {username}")
+            
+            ik = user["keys"]["ik"]
+            spk = user["keys"]["spk"]
+            prekey_sig = user["keys"]["prekey_sig"]
+            
+            self.server.save_user(username, user)
+        
+        self.send_packet({
+            "type": "prekey_bundle",
+            "username": username,
+            "ik": ik,
+            "spk": spk,
+            "prekey_sig": prekey_sig,
+            "opk_id": opk_id,
+            "opk": opk
+        })
+    
+    def process_initiator_message(self, data):
+        conversation_id = new_conversation_id()
+    
+    def close(self):
+        pass
 
 
 class Server:
     KEY_FILE = "server_keys.json"
 
     def __init__(self, sock: socket.socket) -> None:
-        self.clients: Dict[socket.socket, Tuple[threading.Thread, Client]] = {}
+        self.clients: Dict[str, ClientHandler] = {}
         self.server_sock = sock
-        self.public_keys: Dict[str, int] = {}
+        self.stop_event = threading.Event() # TODO
 
         try:
             with open(self.KEY_FILE, "r") as f:
@@ -59,108 +156,62 @@ class Server:
 
         except (OSError, json.JSONDecodeError):
             pass
+    
+    def get_conversation(self, id: str):
+        file = CONVERSATION_FILE.format(id)
+        if not os.path.exists(file):
+            return {}
+        else:
+            with open(file, "r") as f:
+                return json.load(f)
+    
+    def save_conversation(self, id: str, data):
+        file = CONVERSATION_FILE.format(id)
+        with open(file, "w") as f:
+            json.dump(data, f, indent=2)
+    
+    @contextlib.contextmanager
+    def conversation(self, id: str):
+        file = CONVERSATION_FILE.format(id)
+        with locked_resource(file): # TODO: hate this hacky thing
+            yield self.get_conversation(id)
 
-    def get_sock(self, name: str) -> Optional[socket.socket]:
-        for sock, (_, client) in self.clients.items():
-            if client.username == name:
-                return sock
+    def get_user(self, username: str):
+        file = USER_FILE.format(username)
+        if not os.path.exists(file):
+            return {"username": username, "keys": None, "conversations": {}}
+        else:
+            with open(file, "r") as f:
+                return json.load(f)
 
-    def client_link(self, sock: socket.socket, stop_event: threading.Event):
-        """Loop for communicating with a client"""
-        other_sock: Optional[socket.socket] = None
-        other_username: Optional[str] = None
+    def save_user(self, username: str, data: dict):
+        file = USER_FILE.format(username)
+        with open(file, "w") as f:
+            json.dump(data, f, indent=2)
+    
+    @contextlib.contextmanager
+    def user(self, username: str):
+        file = USER_FILE.format(username)
+        with locked_resource(file): # TODO: hate this hacky thing
+            yield self.get_user(username)
 
-        while not stop_event.is_set():
-            try:
-                raw = recv_all(sock)
-                logger.debug(f"data: {raw}")
-                data = dec_json(raw)
-                if data["type"] == "message":
-                    other_username = data["name"]
-                    other_sock = self.get_sock(other_username) # TODO: hashmap lookup
-                    if other_sock is not None:
-                        client = self.clients[sock][1]
-                        message = data["message"]
-                        other_sock.sendall(enc_json({
-                            "type": "message_forward",
-                            "name": client.username,
-                            "message": message
-                        }))
-
-                elif data["type"] == "conversation_request":
-                    other_username = data["name"]
-                    other_sock = self.get_sock(other_username)
-                    username = self.clients[sock][1].username
-                    if other_sock is not None:
-                        # public key exchange
-                        logger.info(f"Initiating conversation between {username} and {other_username}")
-                        other_sock.sendall(enc_json({
-                            "type": "conversation_init",
-                            "name": username,
-                            "public_key": self.public_keys[username]
-                        }))
-
-                        sock.sendall(enc_json({
-                            "type": "conversation_init",
-                            "name": other_username,
-                            "public_key": self.public_keys[other_username]
-                        }))
-                    else:
-                        # TODO: tell user that user was not found
-                        pass
-
-                else:
-                    logger.error(f"Unimplemented message type {data['type']}")
-
-            except Exception as e:
-                logger.error(f"Error from client: {e!r}")
-                self.disconnect(sock)
-                break
-
-    def disconnect(self, sock: socket.socket):
-        client = self.clients[sock][1]
-        del self.clients[sock]
-        self.send_to_all({
-            "type": "user_disconnect",
-            "name": client.username
-        })
-
-    def send_to_all(self, data):
-        d = enc_json(data)
-        for s in list(self.clients.keys()):
-            success = try_send(s, d)
-            if not success:
-                self.disconnect(s)
-
-    def list_users(self) -> List[str]:
-        return [c.username for _, c in self.clients.values()]
-
-    def loop(self, stop_event: threading.Event):
+    def loop(self):
         logger.info("Server started")
         try:
-            while not stop_event.is_set():
+            while not self.stop_event.is_set():
                 client_socket, client_address = self.server_sock.accept()
                 logger.debug("Connection")
 
-                initial_data = dec_json(recv_all(client_socket))
+                initial_data = recv_packet(client_socket)
                 logger.debug(f"Recieved initial payload: {initial_data}")
                 username = initial_data["username"]
-                public_key = initial_data["public_key"]
-                if username in self.public_keys and self.public_keys[username] != public_key:
-                    logger.info(f"Found mismatching key for user {username}")
-                    client_socket.send(enc_json({
-                        "type": "disconnect",
-                        "reason": f"provided public key does not match for user '{username}'"
-                    }))
-                    continue
-                else:
-                    self.public_keys[username] = public_key
-                    logger.info(f"Saved public key for {username}")
 
                 logger.info(f"{username} @ {client_address[0]}:{client_address[1]} connected.")
-
-                t = threading.Thread(target=self.client_link, args=(client_socket, stop_event))
-                self.clients[client_socket] = t, Client(username)
+                
+                client = ClientHandler(server=self, socket=client_socket, username=username)
+                t = threading.Thread(target=client.listener)
+                client.listener_thread = t # TODO: listener should capture thread itself
+                self.clients[username] = client
                 t.daemon = True
                 t.start()
 
@@ -169,17 +220,13 @@ class Server:
             pass
 
     def close(self):
-        self.send_to_all({"type": "server_close"})
-        for s in list(self.clients.keys()):
-            thread, client = self.clients[s]
-            s.close()
-            thread.join()
-
-        self.server_sock.close()
+        self.stop_event.set()
+        for client in self.clients.values():
+            client.send_packet({"type": "server_close"})
+            client.close()
+        
         self.clients.clear()
-
-        with open(self.KEY_FILE, "w") as f:
-            json.dump(self.public_keys, f, indent=2)
+        self.server_sock.close()
 
 
 def main():
@@ -196,8 +243,7 @@ def main():
     server = Server(s)
 
     # Server thread
-    stop_event = threading.Event()
-    t = threading.Thread(target=server.loop, args=(stop_event,))
+    t = threading.Thread(target=server.loop)
     t.daemon = True
     t.start()
 
@@ -208,7 +254,7 @@ def main():
         logger.info("Exiting...")
         pass
 
-    stop_event.set()
+    server.stop_event.set()
     server.close()
 
 

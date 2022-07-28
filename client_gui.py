@@ -1,14 +1,16 @@
+from dataclasses import dataclass
 import PySimpleGUI as sg
 import socket
 import threading
 import json
-from x3dh import dh
+from x3dh import dh, xed25519, kdf
 from x3dh.curve25519 import x25519
 from typing import *
 from Crypto.Cipher import AES
 
 ip = "192.168.1.12"
 port = 6777
+APP_INFO = "TestApp"
 
 sg.theme('DarkAmber')  # Add a touch of color
 # All the stuff inside your window.
@@ -60,6 +62,8 @@ def dec_json(data: bytes):
 
 
 def recv_all(sock: socket.socket, block_size: int = 1024) -> bytes:
+    # TODO: recv_packet
+    # packet is "size:{json stuff...}"
     data = b""
     while True:
         new = sock.recv(block_size)
@@ -70,7 +74,233 @@ def recv_all(sock: socket.socket, block_size: int = 1024) -> bytes:
     return data
 
 
+@dataclass
+class Communication:
+    username: str
+    ipk: bytes # Identity public key
+    shared_key: bytes
+    associated_data: bytes
+
+    @classmethod
+    def from_json(cls, data: dict):
+        return cls(
+            username=data["username"],
+            ipk=bytes.fromhex(data["ipk"]),
+            shared_key=bytes.fromhex(data["shared_key"]),
+            associated_data=bytes.fromhex(data["associated_data"])
+        )
+    
+    def to_json(self):
+        return {
+            "username": self.username,
+            "ipk": self.ipk.hex(),
+            "shared_key": self.shared_key.hex(),
+            "associated_adta": self.associated_data.hex()
+        }
+
+
+@dataclass
+class Session:
+    ik: x25519.X25519KeyPair # Identity key
+    spk: x25519.X25519KeyPair # Signed prekey
+    opks: Dict[int, x25519.X25519KeyPair] # One-time Prekeys
+    prekeys_generated: int # keeps track of total prekeys generated ever
+    communications: List[Communication]
+
+    @classmethod
+    def from_json(cls, data: dict):
+        return cls(
+            ik=x25519.X25519KeyPair.from_json(data["ik"]),
+            spk=x25519.X25519KeyPair.from_json(data["spk"]),
+            opks={
+                k: x25519.X25519KeyPair.from_json(v) for k, v in data["opks"]["keys"].items()
+            },
+            prekeys_generated=data["opks"]["prekeys_generated"],
+            communications=[] # TODO: load communications
+        )
+    
+    def to_json(self) -> dict:
+        return {
+            "ik": self.ik.to_json(),
+            "spk": self.ik.to_json(),
+            "opks": {
+                "keys": {k: v.to_json() for k, v in self.opks.items()},
+                "prekeys_generated": self.prekeys_generated
+            },
+            "communications": {}
+        }
+    
+    @classmethod
+    def create_session(cls, opk_count: int = 10):
+        return cls(
+            ik=x25519.X25519KeyPair(),
+            spk=x25519.X25519KeyPair(),
+            opks={n: x25519.X25519KeyPair() for n in range(10)},
+            prekeys_generated=opk_count,
+            communications=[]
+        )
+
+
 class Client:
+    """ Outlines the implementation of an encrypted client """
+    
+    DATA_LOCATION = "{0}_keys.json"
+    
+    def __init__(self, username: str):
+        self.username = username
+        self.DATA_FILE = self.DATA_LOCATION.format(username)
+        self.server_ip: Optional[str] = None
+        self.server_port: Optional[str] = None
+        self.socket: Optional[socket.socket] = None
+
+        self.stop_event = threading.Event()
+        
+        self.session = self.get_session_or_create()
+        with open(self.DATA_FILE, "w") as f:
+            json.dump(self.session.to_json(), f, indent=2)
+    
+    def get_session_or_create(self) -> Session:
+        try:
+            with open(self.DATA_FILE, "r") as f:
+                print("Loaded existing session.")
+                return Session.from_json(json.load(f))
+        except (OSError, json.JSONDecodeError) as e:
+            return Session.create_session()
+    
+    def connect(self, server_ip: str, server_port: int):
+        self.server_ip = server_ip
+        self.server_port = server_port
+
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket.connect((server_ip, server_port))
+
+        # send initial packet
+        # There is no client authentication, this is just a POC for X3DH
+        self.send_packet({
+            "type": "client_init",
+            "username": self.username,
+        })
+    
+    def publish_keys(self):
+        """ Publishes the initial key-set to the server """
+        self.send_packet({
+            "type": "publish_keys",
+            "ik": self.session.ik.pk.hex(),
+            "spk": self.session.spk.pk.hex(),
+            "prekey_sig": xed25519.sign(self.session.ik.sk, self.session.spk.pk).hex(),
+            "opks": {
+                identifier: key.pk.hex() for identifier, key in self.session.opks.items()
+            }
+        })
+    
+    def update_spk(self):
+        # TODO: send new spk to the server
+        pass
+    
+    def publish_more_opks(self):
+        # TODO: publish more OPKs when they are needed
+        pass
+
+    def establish_shared_key(self, data: dict):
+        other_username = data["username"]
+        ik_other = bytes.fromhex(data["ik"])
+        spk_other = bytes.fromhex(data["spk"])
+        prekey_sig = bytes.fromhex(data["prekey_sig"])
+        opk_id = data["opk_id"]
+        opk = bytes.fromhex(data["opk"]) if data["opk"] else None
+        
+        # ephemeral key
+        ek = x25519.X25519KeyPair()
+
+        # validate prekey_signature
+        # TODO: abort if verification fails
+        assert xed25519.verify(ik_other, spk_other, prekey_sig) == True
+
+        # DH1 = DH(IK_a, SPK_b)
+        dh1 = x25519.X25519(self.session.ik.sk, spk_other)
+
+        # DH2 = DH(EK_a, IK_b)
+        dh2 = x25519.X25519(ek.sk, ik_other)
+
+        # DH3 = DH(EK_a, SPK_b)
+        dh3 = x25519.X25519(ek.sk, spk_other)
+
+        combined = dh1 + dh2 + dh3
+        
+        if opk_id is not None:
+            # DH4 = DH(EK_a, OPK_b)
+            dh4 = x25519.X25519(ek.sk, opk)
+            combined += dh4
+        
+        shared_key = kdf.KDF(combined, info=APP_INFO.encode("utf-8"))
+        associated_data = self.session.ik.pk + ik_other
+
+        print(f"Established shared key with {other_username}: {shared_key.hex()}")
+
+    
+    def send_packet(self, data):
+        # format: length.to_bytes(8, "little") <data>
+        if self.socket is None:
+            raise Exception("Failed to send packet, socket is None.")
+        
+        encoded = json.dumps(data).encode("utf-8")
+        self.socket.sendall(len(encoded).to_bytes(8, "little") + encoded)
+
+    def recv_packet(self):
+        packet_length = int.from_bytes(self.socket.recv(8), "little")
+        data = json.loads(self.socket.recv(packet_length).decode("utf-8"))
+        return data
+
+    def socket_handler(self):
+        try:
+            while not self.stop_event.is_set():
+                data = self.recv_packet()
+                print(f"Received: \n{json.dumps(data, indent=2)}")
+                #if data["type"] == "message_forward":
+                #    self.receive_message(data)
+                if data["type"] == "server_close":
+                    print(f"Server closed.")
+
+                elif data["type"] == "disconnect":
+                    print(f"Disconnected from server, reason: {data['reason']}")
+                
+                elif data["type"] == "request_keys":
+                    self.publish_keys()
+
+                elif data["type"] == "message":
+                    self.on_message(data) # TODO
+
+                #elif data["type"] == "conversation_init":
+                #    print(f"conversation {data}")
+                #    other_name = data["name"]
+                #    other_public_key = data["public_key"]
+                #    shared_key = dh.x25519_gen_shared_key(k.sk, bytes.fromhex(other_public_key))
+                #    print(f"Shared key: {shared_key}")
+                #    self.key_data["negotiations"][other_name] = {
+                #        "public_key": data["public_key"],
+                #        "shared_key": shared_key.hex()
+                #    }
+                #    if other_name not in self.open_conversations:
+                #        self.open_conversations.append(other_name)
+                #        self.regen_name_list()
+
+                elif data["type"] == "prekey_bundle":
+                    self.establish_shared_key(data)
+
+                else:
+                    print(f"Unimplemented message type {data['type']}")
+
+        except Exception as e:
+            print("err", repr(e))
+            if self.stop_event.is_set():
+                print("Disconnected, closing...")
+            else:
+                print("Lost connection, closing...")
+            self.stop_event.set()
+
+
+
+class GuiClient:
     def __init__(self):
         r = get_server()
         if r is not None:
@@ -78,113 +308,21 @@ class Client:
         else:
             exit(0)
 
-        self.DATA_FILE = f"{self.username}_keys.json"
-
-        self.key_data: Dict[str, Any] = {}
-        self.sock = self.open_client()
+        self.client = Client(self.username)
+        self.client.connect(self.ip, self.port)
+        self.thread = threading.Thread(target=self.client.socket_handler)
+        self.thread.daemon = True
+        self.thread.start()
+        
         print("Client opened.")
 
         self.window = sg.Window("Chat App", layout)
         self.window.finalize()
 
-        self.currently_messaging: Optional[str] = None
+        """ self.currently_messaging: Optional[str] = None
         self.open_conversations: List[str] = list(self.key_data["negotiations"].keys())
         self.regen_name_list()
-        self.window["current_info"].update(f"Currenty logged in as {self.username}")
-
-    def open_client(self) -> socket.socket:
-
-        try:
-            with open(self.DATA_FILE, "r") as f:
-                self.key_data = json.load(f)
-                print("Loaded existing key.")
-        except (OSError, json.JSONDecodeError) as e:
-            print(e)
-            k = x25519.X25519KeyPair() # key pair
-            self.key_data = {
-                "mine": {
-                    "private": k.sk.hex()
-                },
-                "negotiations": {}
-            }
-
-        k = x25519.X25519KeyPair(sk=bytes.fromhex(self.key_data["mine"]["private"]))
-
-        with open(self.DATA_FILE, "w") as f:
-            json.dump(self.key_data, f, indent=2)
-
-        print("alive")
-
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.connect((ip, port))
-        sock.sendall(enc_json({
-            "type": "client_init",
-            "username": self.username,
-            "public_key": k.pk.hex()
-        }))
-
-        print("Connected.")
-
-        stop_event = threading.Event()
-
-        def listener():
-            try:
-                while not stop_event.is_set():
-                    data = dec_json(recv_all(sock))
-                    output = self.window["output"]
-                    if data["type"] == "message_forward":
-                        self.receive_message(data)
-
-                    elif data["type"] == "user_connect":
-                        print(f"[+] {data['name']} has connected.")
-
-                    elif data["type"] == "user_disconnect":
-                        # if self.currently_messaging == data["name"]:
-                        #    self.currently_messaging = None
-
-                        print(f"[-] {data['name']} has disconnected.")
-
-                    elif data["type"] == "server_close":
-                        print(f"Server closed.")
-
-                    elif data["type"] == "user_list":
-                        print(f"Users connected: {data['users']}")
-
-                    elif data["type"] == "disconnect":
-                        print(f"Disconnected from server, reason: {data['reason']}")
-
-                    elif data["type"] == "conversation_init":
-                        print(f"conversation {data}")
-                        other_name = data["name"]
-                        other_public_key = data["public_key"]
-                        shared_key = dh.x25519_gen_shared_key(k.sk, bytes.fromhex(other_public_key))
-                        print(f"Shared key: {shared_key}")
-
-                        self.key_data["negotiations"][other_name] = {
-                            "public_key": data["public_key"],
-                            "shared_key": shared_key.hex()
-                        }
-
-                        if other_name not in self.open_conversations:
-                            self.open_conversations.append(other_name)
-                            self.regen_name_list()
-
-                    else:
-                        print(f"Unimplemented message type {data['type']}")
-
-            except Exception as e:
-                print("err", repr(e))
-                if stop_event.is_set():
-                    print("Disconnected, closing...")
-                else:
-                    print("Lost connection, closing...")
-                stop_event.set()
-
-        t = threading.Thread(target=listener)
-        t.daemon = True
-        t.start()
-
-        return sock
+        self.window["current_info"].update(f"Currenty logged in as {self.username}") """
 
     def receive_message(self, data: Dict[str, any]):
         target: str = data["name"]
@@ -203,10 +341,10 @@ class Client:
             self.window["output"].print(f"<{data['name']}> {message}")
 
     def negotiate_key(self, other_username: str):
-        self.sock.sendall(enc_json({
-            "type": "conversation_request",
-            "name": other_username
-        }))
+        self.client.send_packet({
+            "type": "get_prekey_bundle",
+            "username": other_username
+        })
 
     def regen_name_list(self):
         def open_conv(name):
@@ -256,5 +394,6 @@ class Client:
             json.dump(self.key_data, f, indent=2)
 
 
-c = Client()
+c = GuiClient()
 c.mainloop()
+

@@ -39,3 +39,10 @@ class X25519KeyPair:
             self.sk = keygen_private()
         
         self.pk = keygen_public(self.sk)
+    
+    @classmethod
+    def from_json(cls, data):
+        return cls(sk=bytes.fromhex(data["private"]))
+    
+    def to_json(self):
+        return {"private": self.sk.hex()}
