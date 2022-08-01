@@ -1,14 +1,16 @@
 from dataclasses import dataclass
+import datetime
 import PySimpleGUI as sg
 import socket
 import threading
 import json
 from x3dh import dh, xed25519, kdf
+from x3dh.aead import AEAD_AES_128_CBC_HMAC_SHA_256 as aead
 from x3dh.curve25519 import x25519
 from typing import *
 from Crypto.Cipher import AES
 
-ip = "192.168.1.12"
+ip = "192.168.48.1"
 port = 6777
 APP_INFO = "TestApp"
 
@@ -75,27 +77,61 @@ def recv_all(sock: socket.socket, block_size: int = 1024) -> bytes:
 
 
 @dataclass
-class Communication:
+class Message:
+    user_from: str
+    message: str
+    timestamp: datetime.datetime
+
+    @classmethod
+    def from_json(cls, data: dict):
+        return cls(
+            user_from=data["user_from"],
+            message=data["message"],
+            timestamp=datetime.datetime.fromisoformat(data["timestamp"])
+        )
+    
+    def to_json(self) -> dict:
+        return {
+            "user_from": self.user_from,
+            "message": self.message,
+            "timestamp": self.timestamp.isoformat()
+        }
+
+
+@dataclass
+class Conversation:
     username: str
-    ipk: bytes # Identity public key
+    ik: bytes # Identity public key
+    ek: bytes # Ephemeral public key
+    opk_id: Optional[str]
     shared_key: bytes
     associated_data: bytes
+    other_user_has_key: bool # True if other user has been sent key in any way
+    messages: List[Message]
 
     @classmethod
     def from_json(cls, data: dict):
         return cls(
             username=data["username"],
-            ipk=bytes.fromhex(data["ipk"]),
+            ik=bytes.fromhex(data["ik"]),
+            ek=bytes.fromhex(data["ek"]),
+            opk_id=data["opk_id"],
             shared_key=bytes.fromhex(data["shared_key"]),
-            associated_data=bytes.fromhex(data["associated_data"])
+            associated_data=bytes.fromhex(data["associated_data"]),
+            other_user_has_key=data["other_user_has_key"],
+            messages=[Message.from_json(message) for message in data["messages"]]
         )
     
     def to_json(self):
         return {
             "username": self.username,
-            "ipk": self.ipk.hex(),
+            "ik": self.ik.hex(),
+            "ek": self.ek.hex(),
+            "opk_id": self.opk_id,
             "shared_key": self.shared_key.hex(),
-            "associated_adta": self.associated_data.hex()
+            "associated_adta": self.associated_data.hex(),
+            "other_user_has_key": self.other_user_has_key,
+            "messages": [message.to_json() for message in self.messages]
         }
 
 
@@ -105,7 +141,8 @@ class Session:
     spk: x25519.X25519KeyPair # Signed prekey
     opks: Dict[int, x25519.X25519KeyPair] # One-time Prekeys
     prekeys_generated: int # keeps track of total prekeys generated ever
-    communications: List[Communication]
+    conversations: List[Conversation]
+    last_recieved: datetime.datetime
 
     @classmethod
     def from_json(cls, data: dict):
@@ -116,7 +153,8 @@ class Session:
                 k: x25519.X25519KeyPair.from_json(v) for k, v in data["opks"]["keys"].items()
             },
             prekeys_generated=data["opks"]["prekeys_generated"],
-            communications=[] # TODO: load communications
+            conversations=[Conversation.from_json(conv) for conv in data["conversations"]], # TODO: load conversations
+            last_recieved=datetime.datetime.fromisoformat(data["last_recieved"])
         )
     
     def to_json(self) -> dict:
@@ -127,7 +165,8 @@ class Session:
                 "keys": {k: v.to_json() for k, v in self.opks.items()},
                 "prekeys_generated": self.prekeys_generated
             },
-            "communications": {}
+            "conversations": [conv.to_json() for conv in self.conversations],
+            "last_recieved": self.last_recieved.isoformat()
         }
     
     @classmethod
@@ -135,9 +174,9 @@ class Session:
         return cls(
             ik=x25519.X25519KeyPair(),
             spk=x25519.X25519KeyPair(),
-            opks={n: x25519.X25519KeyPair() for n in range(10)},
+            opks={str(n): x25519.X25519KeyPair() for n in range(10)},
             prekeys_generated=opk_count,
-            communications=[]
+            conversations=[]
         )
 
 
@@ -156,8 +195,14 @@ class Client:
         self.stop_event = threading.Event()
         
         self.session = self.get_session_or_create()
+        self.save_session()
+        
+    def save_session(self):
         with open(self.DATA_FILE, "w") as f:
             json.dump(self.session.to_json(), f, indent=2)
+    
+    def load_session(self):
+        self.session = self.get_session_or_create()
     
     def get_session_or_create(self) -> Session:
         try:
@@ -201,7 +246,8 @@ class Client:
         # TODO: publish more OPKs when they are needed
         pass
 
-    def establish_shared_key(self, data: dict):
+    def establish_shared_key_from_prekey_bundle(self, data: dict):
+        """ Establishes a shared key and associated data from a prekey bundle received upon request """
         other_username = data["username"]
         ik_other = bytes.fromhex(data["ik"])
         spk_other = bytes.fromhex(data["spk"])
@@ -216,6 +262,7 @@ class Client:
         # TODO: abort if verification fails
         assert xed25519.verify(ik_other, spk_other, prekey_sig) == True
 
+        # we are client a in this case
         # DH1 = DH(IK_a, SPK_b)
         dh1 = x25519.X25519(self.session.ik.sk, spk_other)
 
@@ -236,7 +283,160 @@ class Client:
         associated_data = self.session.ik.pk + ik_other
 
         print(f"Established shared key with {other_username}: {shared_key.hex()}")
+        return shared_key, associated_data, ek.pk
+    
+    def create_conversation_from_bundle(self, data: dict) -> Conversation:
+        """ Initialise a conversation from a prekey bundle """
+        SK, AD, EK = self.establish_shared_key_from_prekey_bundle(data)
+        other_username = data["username"]
+        conv = Conversation(
+            username=other_username,
+            ik=bytes.fromhex(data["ik"]),
+            ek=EK,
+            opk_id=data["opk_id"],
+            shared_key=SK,
+            associated_data=AD.hex(),
+            other_user_has_key=False,
+            messages=[]
+        )
+        self.session.conversations.append(conv)
+        self.save_session()
 
+        return conv
+    
+    def find_conversation_by_username(self, username: str) -> Optional[Conversation]:
+        for conv in self.session.conversations:
+            if conv.username == username:
+                return conv
+        
+        return None
+    
+    def send_message(self, to: str, message: str):
+        conv = self.find_conversation_by_username(to)
+        if conv is None:
+            raise Exception("You have not established a conversation with this user")
+        
+        shared_key = bytes.fromhex(conv.shared_key)
+        associated_data = bytes.fromhex(conv.associated_data)
+        body = aead.encrypt(shared_key, message, associated_data)
+        
+        message = {
+            "type": "message",
+            "to": to,
+            "body": body.hex(),
+        }
+
+        if not conv.other_user_has_key:
+            message["initiator"] = {
+                "ik": self.session.ik.pk.hex(),
+                "ek": conv.ek,
+                "opk_id": conv.opk_id,
+            }
+
+        self.send_packet(message)
+        
+        self.session.last_recieved = datetime.datetime.now()
+        self.save_session()
+    
+    def get_opk_from_id_and_remove(self, opk_id: str) -> Optional[bytes]:
+        if opk_id in self.session.opks:
+            return self.session.opks.pop(opk_id)
+        return None
+    
+    def establish_shared_key_from_initiator(self, other_username: str, data: dict):
+        """ Establishes a shared key and associated data from an initiator message """
+        ik = self.session.ik.sk
+        ik_other = bytes.fromhex(data["ik"])
+        spk = self.session.spk.sk
+        ek = bytes.fromhex(data["ek"])
+        opk_id = data["opk_id"]
+        if opk_id is None:
+            print(f"WARN: communication with {other_username} has no one-time prekey!")
+            opk = None
+        else:
+            opk = self.get_opk_from_id_and_remove(opk_id)
+            if opk is None:
+                raise Exception(f"Could not find one-time prekey of ID {opk_id!r}")
+
+        # we are client b in this case
+        # DH1 = DH(IK_a, SPK_b)
+        dh1 = x25519.X25519(spk, ik_other)
+
+        # DH2 = DH(EK_a, IK_b)
+        dh2 = x25519.X25519(ik, ek)
+
+        # DH3 = DH(EK_a, SPK_b)
+        dh3 = x25519.X25519(spk, ek)
+
+        combined = dh1 + dh2 + dh3
+        
+        if opk_id is not None:
+            # DH4 = DH(EK_a, OPK_b)
+            dh4 = x25519.X25519(opk, ek)
+            combined += dh4
+        
+        shared_key = kdf.KDF(combined, info=APP_INFO.encode("utf-8"))
+        associated_data = ik_other + ik
+
+        print(f"Established shared key with {other_username}: {shared_key.hex()}")
+        return shared_key, associated_data, ek
+    
+    def create_conversation_from_initiator(self, other_username: str, data: dict) -> Conversation:
+        """ Initialise a conversation from an initiator message """
+        SK, AD, EK = self.establish_shared_key_from_initiator(other_username, data)
+        other_username = data["username"]
+        conv = Conversation(
+            username=other_username,
+            ik=bytes.fromhex(data["ik"]),
+            ek=EK,
+            opk_id=data["opk_id"],
+            shared_key=SK,
+            associated_data=AD.hex(),
+            other_user_has_key=True, # they sent us initiator, so they must have the key
+            messages=[]
+        )
+        self.session.conversations.append(conv)
+        self.save_session()
+
+        return conv
+    
+    def on_message(self, data: dict):
+        user_from = data["from"]
+        conv = self.find_conversation_by_username(user_from)
+        if conv is None:
+            if "initiator" in data:
+                # initialise the convesation
+                conv = self.create_conversation_from_initiator(user_from, data)
+            else:
+                raise Exception("Recieved first message without an initialiser")
+        
+        self.session.last_recieved = datetime.datetime.now()
+        self.save_session()
+        
+        # process the message
+        ciphertext = bytes.fromhex(data["body"])
+        text = aead.decrypt(conv.shared_key, conv.associated_data, ciphertext)
+
+        message = Message(
+            user_from=data["from"],
+            message=text,
+            timestamp=datetime.datetime.fromisoformat(data["timestamp"])
+        )
+
+        conv.messages.append(message)
+    
+    def fetch_messages_after(self, timestamp: datetime.datetime):
+        self.send_packet({
+            "type": "request_messages_after",
+            "timestamp": timestamp.isoformat()
+        })
+    
+    def process_messages_after(self, data):
+        self.session.last_recieved = datetime.datetime.now()
+        self.save_session()
+        for username, new_messages in self.data["messages"]:
+            conv = self.find_conversation_by_username(username)
+            self.on_message(data)
     
     def send_packet(self, data):
         # format: length.to_bytes(8, "little") <data>
@@ -253,6 +453,9 @@ class Client:
 
     def socket_handler(self):
         try:
+            # Fetch message backlog
+            self.fetch_messages_after(self.session.last_recieved)
+            
             while not self.stop_event.is_set():
                 data = self.recv_packet()
                 print(f"Received: \n{json.dumps(data, indent=2)}")
@@ -268,24 +471,14 @@ class Client:
                     self.publish_keys()
 
                 elif data["type"] == "message":
-                    self.on_message(data) # TODO
+                    self.on_message(data)
 
-                #elif data["type"] == "conversation_init":
-                #    print(f"conversation {data}")
-                #    other_name = data["name"]
-                #    other_public_key = data["public_key"]
-                #    shared_key = dh.x25519_gen_shared_key(k.sk, bytes.fromhex(other_public_key))
-                #    print(f"Shared key: {shared_key}")
-                #    self.key_data["negotiations"][other_name] = {
-                #        "public_key": data["public_key"],
-                #        "shared_key": shared_key.hex()
-                #    }
-                #    if other_name not in self.open_conversations:
-                #        self.open_conversations.append(other_name)
-                #        self.regen_name_list()
+                elif data["type"] == "messages_after":
+                    self.process_messages_after(data)
+                
 
                 elif data["type"] == "prekey_bundle":
-                    self.establish_shared_key(data)
+                    self.create_conversation_from_bundle(data)
 
                 else:
                     print(f"Unimplemented message type {data['type']}")

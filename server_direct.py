@@ -2,11 +2,11 @@ import contextlib
 import os
 import socket
 import threading
-import socketserver
 import time
 from typing import *
 from dataclasses import dataclass
-from locked_resource import locked_resource, modifiable_locked_resource
+from locked_resource import locked_resource
+import datetime
 import logging
 import json
 import uuid
@@ -83,17 +83,42 @@ class ClientHandler:
                 print(f"Unkown packet type {data['type']!r}")
     
     def process_message(self, data):
-        user_data = self.server.get_user(self.username)
-        conversation_id = user_data["conversations"][data["username"]]
+        timestamp = datetime.datetime().isoformat()
+        with self.server.user(self.username) as user_data:
+            user_data = self.server.get_user(self.username)
+            if data["username"] not in user_data["conversations"]:
+                user_data["conversations"][data["username"]] = str(uuid.uuid4())
+            
+            conversation_id = user_data["conversations"][data["username"]]
+            self.server.save_user(self.username, user_data)
+            
         with self.server.conversation(conversation_id) as conv:
             conv["messages"].append({
+                **data,
                 "type": "message",
-                "body": data["body"]
+                "from": self.username,
+                "timestamp": timestamp,
             })
             self.server.save_conversation(conversation_id, conv)
     
-        if data["to"] in self.server.cleints:
+        if data["to"] in self.server.clients:
+            data["from"] = self.username
+            data["timestamp"] = timestamp
             self.server.clients[data["to"]].send_packet(data)
+    
+    def send_messages_after(self, timestamp: datetime.datetime):
+        missed = {}
+        for username, conv in self.server.get_user(self.username):
+            missed[username] = [
+                message
+                for message in conv["messages"]
+                if datetime.datetime.fromisoformat(message["timestamp"]) > timestamp
+            ]
+        
+        self.send_packet({
+            "type": "messages_after",
+            "messages": missed
+        })
     
     def store_published_keys(self, data):
         with self.server.user(self.username) as user:
@@ -135,9 +160,6 @@ class ClientHandler:
             "opk": opk
         })
     
-    def process_initiator_message(self, data):
-        conversation_id = new_conversation_id()
-    
     def close(self):
         pass
 
@@ -160,7 +182,7 @@ class Server:
     def get_conversation(self, id: str):
         file = CONVERSATION_FILE.format(id)
         if not os.path.exists(file):
-            return {}
+            return {"messages": []}
         else:
             with open(file, "r") as f:
                 return json.load(f)
@@ -179,7 +201,11 @@ class Server:
     def get_user(self, username: str):
         file = USER_FILE.format(username)
         if not os.path.exists(file):
-            return {"username": username, "keys": None, "conversations": {}}
+            return {
+                "username": username,
+                "keys": None,
+                "conversations": {}
+            }
         else:
             with open(file, "r") as f:
                 return json.load(f)
