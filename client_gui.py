@@ -1,14 +1,17 @@
 from dataclasses import dataclass
 import datetime
+import queue
 import PySimpleGUI as sg
 import socket
 import threading
 import json
-from x3dh import dh, xed25519, kdf
+from x3dh import xed25519, kdf
 from x3dh.aead import AEAD_AES_128_CBC_HMAC_SHA_256 as aead
 from x3dh.curve25519 import x25519
 from typing import *
 from Crypto.Cipher import AES
+from events import Emitter
+from enum import Enum
 
 ip = "192.168.48.1"
 port = 6777
@@ -129,7 +132,7 @@ class Conversation:
             "ek": self.ek.hex(),
             "opk_id": self.opk_id,
             "shared_key": self.shared_key.hex(),
-            "associated_adta": self.associated_data.hex(),
+            "associated_data": self.associated_data.hex(),
             "other_user_has_key": self.other_user_has_key,
             "messages": [message.to_json() for message in self.messages]
         }
@@ -160,7 +163,7 @@ class Session:
     def to_json(self) -> dict:
         return {
             "ik": self.ik.to_json(),
-            "spk": self.ik.to_json(),
+            "spk": self.spk.to_json(),
             "opks": {
                 "keys": {k: v.to_json() for k, v in self.opks.items()},
                 "prekeys_generated": self.prekeys_generated
@@ -176,16 +179,21 @@ class Session:
             spk=x25519.X25519KeyPair(),
             opks={str(n): x25519.X25519KeyPair() for n in range(10)},
             prekeys_generated=opk_count,
-            conversations=[]
+            conversations=[],
+            last_recieved=datetime.datetime.min
         )
 
+class ClientEvent(Enum):
+    NEW_CONVERSATION = "NEW_CONVERSATION"
+    ON_MESSAGE = "ON_MESSAGE"
 
-class Client:
+class Client(Emitter[ClientEvent]):
     """ Outlines the implementation of an encrypted client """
     
     DATA_LOCATION = "{0}_keys.json"
     
     def __init__(self, username: str):
+        super().__init__()
         self.username = username
         self.DATA_FILE = self.DATA_LOCATION.format(username)
         self.server_ip: Optional[str] = None
@@ -301,11 +309,12 @@ class Client:
             ek=EK,
             opk_id=data["opk_id"],
             shared_key=SK,
-            associated_data=AD.hex(),
+            associated_data=AD,
             other_user_has_key=False,
             messages=[]
         )
         self.session.conversations.append(conv)
+        self.dispatch_event(ClientEvent.NEW_CONVERSATION, conv=conv)
         self.save_session()
 
         return conv
@@ -322,9 +331,9 @@ class Client:
         if conv is None:
             raise Exception("You have not established a conversation with this user")
         
-        shared_key = bytes.fromhex(conv.shared_key)
-        associated_data = bytes.fromhex(conv.associated_data)
-        body = aead.encrypt(shared_key, message, associated_data)
+        shared_key = conv.shared_key
+        associated_data = conv.associated_data
+        body = aead.encrypt(shared_key, message.encode("utf-8"), associated_data)
         
         message_packet = {
             "type": "message",
@@ -335,19 +344,23 @@ class Client:
         if not conv.other_user_has_key:
             message_packet["initiator"] = {
                 "ik": self.session.ik.pk.hex(),
-                "ek": conv.ek,
+                "ek": conv.ek.hex(),
                 "opk_id": conv.opk_id,
             }
+            conv.other_user_has_key = True
 
         self.send_packet(message_packet)
 
-        self.on_message(message_packet, conversation_with=to)
+        message_packet["timestamp"] = datetime.datetime.now().isoformat() # TODO: this is hacky
+
+        self.process_message(message_packet, other_user=to)
         self.save_session()
     
-    def get_opk_from_id_and_remove(self, opk_id: str) -> Optional[bytes]:
+    def get_opk_from_id_and_remove(self, opk_id: str) -> Optional[x25519.X25519KeyPair]:
         if opk_id in self.session.opks:
             return self.session.opks.pop(opk_id)
-        return None
+        
+        raise Exception(f"Invalid One-time prekey id {opk_id!r}")
     
     def establish_shared_key_from_initiator(self, other_username: str, data: dict):
         """ Establishes a shared key and associated data from an initiator message """
@@ -360,7 +373,7 @@ class Client:
             print(f"WARN: communication with {other_username} has no one-time prekey!")
             opk = None
         else:
-            opk = self.get_opk_from_id_and_remove(opk_id)
+            opk = self.get_opk_from_id_and_remove(opk_id).sk
             if opk is None:
                 raise Exception(f"Could not find one-time prekey of ID {opk_id!r}")
 
@@ -382,7 +395,7 @@ class Client:
             combined += dh4
         
         shared_key = kdf.KDF(combined, info=APP_INFO.encode("utf-8"))
-        associated_data = ik_other + ik
+        associated_data = ik_other + self.session.ik.pk
 
         print(f"Established shared key with {other_username}: {shared_key.hex()}")
         return shared_key, associated_data, ek
@@ -390,29 +403,29 @@ class Client:
     def create_conversation_from_initiator(self, other_username: str, data: dict) -> Conversation:
         """ Initialise a conversation from an initiator message """
         SK, AD, EK = self.establish_shared_key_from_initiator(other_username, data)
-        other_username = data["username"]
         conv = Conversation(
             username=other_username,
             ik=bytes.fromhex(data["ik"]),
             ek=EK,
             opk_id=data["opk_id"],
             shared_key=SK,
-            associated_data=AD.hex(),
+            associated_data=AD,
             other_user_has_key=True, # they sent us initiator, so they must have the key
             messages=[]
         )
         self.session.conversations.append(conv)
+        self.dispatch_event(ClientEvent.NEW_CONVERSATION, conv=conv)
         self.save_session()
 
         return conv
     
-    def on_message(self, data: dict, conversation_with: Optional[str] = None):
-        user_from = conversation_with if conversation_with is not None else data["from"]
-        conv = self.find_conversation_by_username(user_from)
+    def process_message(self, data: dict, other_user: str):
+        user_from = data["from"] if "from" in data else self.username
+        conv = self.find_conversation_by_username(other_user)
         if conv is None:
             if "initiator" in data:
                 # initialise the convesation
-                conv = self.create_conversation_from_initiator(user_from, data)
+                conv = self.create_conversation_from_initiator(other_user, data["initiator"])
             else:
                 raise Exception("Recieved first message without an initialiser")
         
@@ -421,14 +434,19 @@ class Client:
         # process the message
         ciphertext = bytes.fromhex(data["body"])
         text = aead.decrypt(conv.shared_key, conv.associated_data, ciphertext)
+        if text is None:
+            raise Exception("AEAD failed") # TODO: display warning or something
+        
+        text = text.decode("utf-8")
 
         message = Message(
-            user_from=data["from"],
+            user_from=user_from,
             message=text,
             timestamp=datetime.datetime.fromisoformat(data["timestamp"])
         )
 
         conv.messages.append(message)
+        self.dispatch_event(ClientEvent.ON_MESSAGE, conv=conv, message=message)
         self.save_session()
     
     def fetch_messages_after(self, timestamp: datetime.datetime):
@@ -440,9 +458,9 @@ class Client:
     def process_messages_after(self, data: dict):
         self.session.last_recieved = datetime.datetime.now()
         self.save_session()
-        for username, new_messages in self.data["messages"]:
+        for username, new_messages in data["messages"].items():
             for message in new_messages:
-                self.on_message(message, conversation_with=username)
+                self.process_message(message, other_user=username)
     
     def send_packet(self, data):
         # format: length.to_bytes(8, "little") <data>
@@ -477,7 +495,7 @@ class Client:
                     self.publish_keys()
 
                 elif data["type"] == "message":
-                    self.on_message(data)
+                    self.process_message(data, other_user=data["from"])
 
                 elif data["type"] == "messages_after":
                     self.process_messages_after(data)
@@ -518,76 +536,89 @@ class GuiClient:
         self.window = sg.Window("Chat App", layout)
         self.window.finalize()
 
-        """ self.currently_messaging: Optional[str] = None
-        self.open_conversations: List[str] = list(self.key_data["negotiations"].keys())
-        self.regen_name_list()
-        self.window["current_info"].update(f"Currenty logged in as {self.username}") """
+        self.currently_messaging: Optional[str] = None
+        self.open_conversations: List[str] = []
+        self.regen_conversation_list()
+        self.window["current_info"].update(f"Currenty logged in as {self.username}")
 
-    def receive_message(self, data: Dict[str, any]):
-        target: str = data["name"]
-        if target in self.key_data["negotiations"]:
-            shared_key = bytes.fromhex(self.key_data["negotiations"][target]["shared_key"])
-            nonce = bytes.fromhex(data["message"]["nonce"])
-
-            cipher = AES.new(shared_key, AES.MODE_EAX, nonce)
-
-            message = cipher.decrypt_and_verify(
-                bytes.fromhex(data["message"]["ciphertext"]),
-                bytes.fromhex(data["message"]["tag"])
-            ).decode("utf-8")
-
-            print(f"<{data['name']}> {message}")
-            self.window["output"].print(f"<{data['name']}> {message}")
+        self.capture_event(ClientEvent.NEW_CONVERSATION, self.on_new_conversation)
+        self.capture_event(ClientEvent.ON_MESSAGE, self.on_message)
+    
+    def capture_event(self, event_type: ClientEvent, handler: Callable):
+        self.client.register_handler(
+            event_type,
+            lambda *args, **kwargs: self.window.write_event_value(
+                event_type,
+                lambda: handler(*args, **kwargs)
+            )
+        )
+    
+    def request_gui_update(self, updater_func: Callable):
+        self.gui_update_queue.put(updater_func)
 
     def negotiate_key(self, other_username: str):
         self.client.request_prekey_bundle(other_username)
+    
+    def reload_conversation(self):
+        self.window["output"].update("")
+        if self.currently_messaging is not None:
+            conv = self.client.find_conversation_by_username(self.currently_messaging)
+            if conv is not None:
+                for message in conv.messages:
+                    self.add_message(message)
 
-    def regen_name_list(self):
-        def open_conv(name):
+    def regen_conversation_list(self):
+        def open_conv(name: str):
             self.currently_messaging = name
-            self.window["output"].update("")
+            self.reload_conversation()
 
-        new_layout = [[sg.Radio(name, "open_conversation_btns", enable_events=True, key=lambda: open_conv(name))] for
-                      name in self.open_conversations]
+        new_layout = [
+            [
+                sg.Radio(
+                    conv.username,
+                    "open_conversation_btns",
+                    enable_events=True,
+                    key=lambda: open_conv(conv.username)
+                )
+            ]
+            for conv in self.client.session.conversations
+        ]
+        
         self.window.extend_layout(self.window["open_conversations"], new_layout)
-
-    def try_send_message(self, message: str, target: str):
-        # TODO: send to correct person
-        self.window["output"].print(f"<{self.username}> {message}")
-        if target in self.key_data["negotiations"]:
-            shared_key = bytes.fromhex(self.key_data["negotiations"][target]["shared_key"])
-
-            cipher = AES.new(shared_key, AES.MODE_EAX)
-            ciphertext, tag = cipher.encrypt_and_digest(message.encode("utf-8"))
-
-            self.sock.sendall(enc_json({
-                "type": "message",
-                "name": target,
-                "message": {
-                    "nonce": cipher.nonce.hex(),
-                    "ciphertext": ciphertext.hex(),
-                    "tag": tag.hex()
-                }
-            }))
+    
+    def add_message(self, message: Message):
+        # TODO: display time
+        self.window["output"].print(f"<{message.user_from}> {message.message}")
+        
+    
+    def on_message(self, conv: Conversation, message: Message):
+        if self.currently_messaging == conv.username:
+            self.add_message(message)
+    
+    def on_new_conversation(self, conv: Conversation):
+        self.regen_conversation_list()
 
     def mainloop(self):
         while True:
             event, values = self.window.read()
+
+            # Client events
+            if isinstance(event, ClientEvent):
+                values[event]()
+
+
             if event == sg.WIN_CLOSED or event == 'Cancel':  # if user closes window or clicks cancel
                 break
             if event == "Negotiate":
                 self.negotiate_key(values["n_user"])
             if event == "Send":
                 if self.currently_messaging is not None:
-                    self.try_send_message(values["message"], self.currently_messaging)
+                    self.client.send_message(self.currently_messaging, values["message"])
 
             if callable(event):
                 event()
 
         self.window.close()
-
-        with open(self.DATA_FILE, "w") as f:
-            json.dump(self.key_data, f, indent=2)
 
 
 c = GuiClient()

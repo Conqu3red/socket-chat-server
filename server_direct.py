@@ -16,9 +16,9 @@ FORMAT = '[%(asctime)s %(levelname)s %(module)s:%(lineno)d] %(message)s'
 logging.basicConfig(format=FORMAT, datefmt=DATETIME_FMT, level=logging.DEBUG)
 logger = logging.getLogger('tcp_server')
 
-@dataclass
-class Client:
-    username: str
+
+class CloseListener:
+    pass
 
 
 CONVERSATION_FILE = "data/conversations/{0}.json"
@@ -53,10 +53,20 @@ class ClientHandler:
         self.listener_thread: Optional[threading.Thread] = None
     
     def send_packet(self, data):
-        send_packet(self.socket, data)
+        try:
+            send_packet(self.socket, data)
+        except Exception as e:
+            print(f"Exception whilst trying to send packet from {self.username!r}: {e}")
+            self.close()
+
 
     def recv_packet(self):
-        return recv_packet(self.socket)
+        try:
+            return recv_packet(self.socket)
+        except Exception as e:
+            print(f"Exception whilst trying to recieve packet from {self.username!r}: {e}")
+            self.close()
+            return CloseListener()
     
     def listener(self):
         user_data = self.server.get_user(self.username)
@@ -67,6 +77,9 @@ class ClientHandler:
             data = self.recv_packet()
             print(f"Recieved packet: {data}")
 
+            if isinstance(data, CloseListener):
+                return
+
             if data["type"] == "message":
                 self.process_message(data)
             
@@ -76,21 +89,28 @@ class ClientHandler:
             elif data["type"] == "get_prekey_bundle":
                 self.fetch_prekey_bundle(data)
             
-            elif data["type"] == "first_message":
-                self.process_initiator_message(data)
+            elif data["type"] == "request_messages_after":
+                self.send_messages_after(datetime.datetime.fromisoformat(data["timestamp"]))
             
             else:
                 print(f"Unkown packet type {data['type']!r}")
     
     def process_message(self, data):
-        timestamp = datetime.datetime().isoformat()
+        timestamp = datetime.datetime.now().isoformat()
         with self.server.user(self.username) as user_data:
             user_data = self.server.get_user(self.username)
-            if data["username"] not in user_data["conversations"]:
-                user_data["conversations"][data["username"]] = str(uuid.uuid4())
+            if data["to"] not in user_data["conversations"]:
+                user_data["conversations"][data["to"]] = str(uuid.uuid4())
             
-            conversation_id = user_data["conversations"][data["username"]]
+            conversation_id = user_data["conversations"][data["to"]]
             self.server.save_user(self.username, user_data)
+        
+        with self.server.user(data["to"]) as other_user_data:
+            if self.username not in other_user_data["conversations"]:
+                other_user_data["conversations"][self.username] = conversation_id
+            
+            self.server.save_user(data["to"], other_user_data)
+
             
         with self.server.conversation(conversation_id) as conv:
             conv["messages"].append({
@@ -108,7 +128,9 @@ class ClientHandler:
     
     def send_messages_after(self, timestamp: datetime.datetime):
         missed = {}
-        for username, conv in self.server.get_user(self.username):
+        user_data = self.server.get_user(self.username)
+        for username, conv_id in user_data["conversations"].items():
+            conv = self.server.get_conversation(conv_id)
             missed[username] = [
                 message
                 for message in conv["messages"]
@@ -163,7 +185,9 @@ class ClientHandler:
         })
     
     def close(self):
-        pass
+        with locked_resource("__clients__"):
+            self.socket.close()
+            self.server.clients.pop(self.username)
 
 
 class Server:
