@@ -246,6 +246,12 @@ class Client:
         # TODO: publish more OPKs when they are needed
         pass
 
+    def request_prekey_bundle(self, other_username: str):
+        self.send_packet({
+            "type": "get_prekey_bundle",
+            "username": other_username
+        })
+
     def establish_shared_key_from_prekey_bundle(self, data: dict):
         """ Establishes a shared key and associated data from a prekey bundle received upon request """
         other_username = data["username"]
@@ -320,22 +326,22 @@ class Client:
         associated_data = bytes.fromhex(conv.associated_data)
         body = aead.encrypt(shared_key, message, associated_data)
         
-        message = {
+        message_packet = {
             "type": "message",
             "to": to,
             "body": body.hex(),
         }
 
         if not conv.other_user_has_key:
-            message["initiator"] = {
+            message_packet["initiator"] = {
                 "ik": self.session.ik.pk.hex(),
                 "ek": conv.ek,
                 "opk_id": conv.opk_id,
             }
 
-        self.send_packet(message)
-        
-        self.session.last_recieved = datetime.datetime.now()
+        self.send_packet(message_packet)
+
+        self.on_message(message_packet, conversation_with=to)
         self.save_session()
     
     def get_opk_from_id_and_remove(self, opk_id: str) -> Optional[bytes]:
@@ -400,8 +406,8 @@ class Client:
 
         return conv
     
-    def on_message(self, data: dict):
-        user_from = data["from"]
+    def on_message(self, data: dict, conversation_with: Optional[str] = None):
+        user_from = conversation_with if conversation_with is not None else data["from"]
         conv = self.find_conversation_by_username(user_from)
         if conv is None:
             if "initiator" in data:
@@ -411,7 +417,6 @@ class Client:
                 raise Exception("Recieved first message without an initialiser")
         
         self.session.last_recieved = datetime.datetime.now()
-        self.save_session()
         
         # process the message
         ciphertext = bytes.fromhex(data["body"])
@@ -424,6 +429,7 @@ class Client:
         )
 
         conv.messages.append(message)
+        self.save_session()
     
     def fetch_messages_after(self, timestamp: datetime.datetime):
         self.send_packet({
@@ -431,12 +437,12 @@ class Client:
             "timestamp": timestamp.isoformat()
         })
     
-    def process_messages_after(self, data):
+    def process_messages_after(self, data: dict):
         self.session.last_recieved = datetime.datetime.now()
         self.save_session()
         for username, new_messages in self.data["messages"]:
-            conv = self.find_conversation_by_username(username)
-            self.on_message(data)
+            for message in new_messages:
+                self.on_message(message, conversation_with=username)
     
     def send_packet(self, data):
         # format: length.to_bytes(8, "little") <data>
@@ -534,10 +540,7 @@ class GuiClient:
             self.window["output"].print(f"<{data['name']}> {message}")
 
     def negotiate_key(self, other_username: str):
-        self.client.send_packet({
-            "type": "get_prekey_bundle",
-            "username": other_username
-        })
+        self.client.request_prekey_bundle(other_username)
 
     def regen_name_list(self):
         def open_conv(name):

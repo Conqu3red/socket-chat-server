@@ -115,6 +115,8 @@ class ClientHandler:
                 if datetime.datetime.fromisoformat(message["timestamp"]) > timestamp
             ]
         
+        print(f"Sending backlog:\n{json.dumps(missed, indent=2)}")
+        
         self.send_packet({
             "type": "messages_after",
             "messages": missed
