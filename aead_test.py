@@ -1,5 +1,5 @@
 import os
-from x3dh.aead import AEAD_AES_128_CBC_HMAC_SHA_256 as aead
+from signal_protocol.aead import AEAD_AES_128_CBC_HMAC_SHA_256 as aead
 
 key = os.urandom(32)
 message = b"Hello!!"

@@ -5,15 +5,15 @@ import PySimpleGUI as sg
 import socket
 import threading
 import json
-from x3dh import xed25519, kdf
-from x3dh.aead import AEAD_AES_128_CBC_HMAC_SHA_256 as aead
-from x3dh.curve25519 import x25519
+from signal_protocol import xed25519, kdf
+from signal_protocol.aead import AEAD_AES_128_CBC_HMAC_SHA_256 as aead
+from signal_protocol.curve25519 import x25519
 from typing import *
 from Crypto.Cipher import AES
 from events import Emitter
 from enum import Enum
 
-ip = "192.168.48.1"
+ip = "192.168.1.12"
 port = 6777
 APP_INFO = "TestApp"
 

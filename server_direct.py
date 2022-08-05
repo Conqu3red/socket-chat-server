@@ -75,10 +75,12 @@ class ClientHandler:
 
         while not self.server.stop_event.is_set():
             data = self.recv_packet()
-            print(f"Recieved packet: {data}")
 
             if isinstance(data, CloseListener):
+                logger.debug(f"({self.username}) close packet")
                 return
+            
+            logger.debug(f"({self.username}) sent packet: \n{json.dumps(data, indent=2)}")
 
             if data["type"] == "message":
                 self.process_message(data)

@@ -1,5 +1,5 @@
-from x3dh.curve25519.x25519 import X25519KeyPair
-from x3dh.dh import x25519_gen_shared_key
+from signal_protocol.curve25519.x25519 import X25519KeyPair
+from signal_protocol.dh import x25519_gen_shared_key
 
 alice = X25519KeyPair()
 bob = X25519KeyPair()

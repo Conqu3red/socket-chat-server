@@ -1,5 +1,5 @@
-from x3dh.curve25519 import x25519
-from x3dh.sig import Sign, Verify
+from signal_protocol.curve25519 import x25519
+from signal_protocol.sig import Sign, Verify
 
 sk = x25519.keygen_private()
 pk = x25519.keygen_public(sk)

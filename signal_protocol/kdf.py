@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 from math import ceil
+from typing import Tuple
 
 HASH_LEN = 32
 
@@ -11,6 +12,10 @@ def hmac_sha256(key: bytes, data: bytes):
 
 def hkdf(length: int, ikm: bytes, salt: bytes = b"", info: bytes = b"") -> bytes:
     """ Key derivation function
+    length : bytes to be returned
+    ikm : initial key material
+    salt : 
+    info : 
     """
     if len(salt) == 0:
         salt = bytes([0] * HASH_LEN)
@@ -30,3 +35,5 @@ def KDF(KM: bytes, info: bytes = b"") -> bytes:
     # this code assumes the x25519 curve
     F = bytes([0xFF] * 32)
     return hkdf(32, ikm = F + KM, salt = bytes([0] * 32), info = info)
+
+

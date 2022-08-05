@@ -1,4 +1,4 @@
-from x3dh.curve25519.ed25519 import TwistedEdwardsPoint
+from signal_protocol.curve25519.ed25519 import TwistedEdwardsPoint
 
 """ sk = bytes.fromhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
 test_pk = bytes.fromhex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
@@ -31,8 +31,8 @@ print(TwistedEdwardsPoint.BASE_POINT)
 print(TwistedEdwardsPoint.BASE_POINT.to_homogeneous().to_actual())
 print(TwistedEdwardsPoint.BASE_POINT.on_curve())
 
-from x3dh import xed25519
-from x3dh.curve25519 import x25519
+from signal_protocol import xed25519
+from signal_protocol.curve25519 import x25519
 sk = x25519.keygen_private()
 pk = x25519.keygen_public(sk)
 
