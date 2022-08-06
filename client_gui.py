@@ -4,7 +4,7 @@ import threading
 from typing import *
 from client import *
 
-ip = "192.168.1.12"
+ip = "192.168.48.1"
 port = 6777
 
 sg.theme('DarkAmber')  # Add a touch of color

@@ -3,13 +3,12 @@ import datetime
 import socket
 import threading
 import json
-from signal_protocol import xed25519, kdf
+from signal_protocol import xed25519, kdf, double_ratchet
 from signal_protocol.aead import AEAD_AES_128_CBC_HMAC_SHA_256 as aead
 from signal_protocol.curve25519 import x25519
 from typing import *
 from events import Emitter
 from enum import Enum
-from abc import ABC
 
 APP_INFO = "TestApp"
 
@@ -44,6 +43,7 @@ class Conversation:
     shared_key: bytes
     associated_data: bytes
     other_user_has_key: bool # True if other user has been sent key in any way
+    state: double_ratchet.State
     messages: List[Message]
 
     @classmethod
@@ -56,6 +56,7 @@ class Conversation:
             shared_key=bytes.fromhex(data["shared_key"]),
             associated_data=bytes.fromhex(data["associated_data"]),
             other_user_has_key=data["other_user_has_key"],
+            state=double_ratchet.State.from_json(data["state"]),
             messages=[Message.from_json(message) for message in data["messages"]]
         )
     
@@ -68,6 +69,7 @@ class Conversation:
             "shared_key": self.shared_key.hex(),
             "associated_data": self.associated_data.hex(),
             "other_user_has_key": self.other_user_has_key,
+            "state": self.state.to_json(),
             "messages": [message.to_json() for message in self.messages]
         }
 
@@ -245,6 +247,10 @@ class Client(Emitter[ClientEvent]):
             shared_key=SK,
             associated_data=AD,
             other_user_has_key=False,
+            state = double_ratchet.ratchetInitAsFirstSender(
+                SK=SK,
+                other_dh_public_key=bytes.fromhex(data["spk"])
+            ),
             messages=[]
         )
         self.session.conversations.append(conv)
@@ -265,13 +271,16 @@ class Client(Emitter[ClientEvent]):
         if conv is None:
             raise Exception("You have not established a conversation with this user")
         
-        shared_key = conv.shared_key
-        associated_data = conv.associated_data
-        body = aead.encrypt(shared_key, message.encode("utf-8"), associated_data)
+        header, body = double_ratchet.RatchetEncrypt(
+            state = conv.state,
+            plaintext = message.encode("utf-8"),
+            AD = conv.associated_data
+        )
         
         message_packet = {
             "type": "message",
             "to": to,
+            "header": header.encode().hex(),
             "body": body.hex(),
         }
 
@@ -281,13 +290,22 @@ class Client(Emitter[ClientEvent]):
                 "ek": conv.ek.hex(),
                 "opk_id": conv.opk_id,
             }
+            # TODO: send with every message until we get a response
             conv.other_user_has_key = True
 
         self.send_packet(message_packet)
 
         message_packet["timestamp"] = datetime.datetime.now().isoformat() # TODO: this is hacky
 
-        self.process_message(message_packet, other_user=to)
+        # we sent the message, so we just add the plain one
+        self.add_message(
+            conv,
+            Message(
+                user_from=self.username,
+                message=message,
+                timestamp=datetime.datetime.now()
+            )
+        )
         self.save_session()
     
     def get_opk_from_id_and_remove(self, opk_id: str) -> Optional[x25519.X25519KeyPair]:
@@ -345,6 +363,10 @@ class Client(Emitter[ClientEvent]):
             shared_key=SK,
             associated_data=AD,
             other_user_has_key=True, # they sent us initiator, so they must have the key
+            state = double_ratchet.ratchetInitAsFirstReciever(
+                SK=SK,
+                dh_key_pair=self.session.spk
+            ),
             messages=[]
         )
         self.session.conversations.append(conv)
@@ -352,6 +374,11 @@ class Client(Emitter[ClientEvent]):
         self.save_session()
 
         return conv
+    
+    def add_message(self, conv: Conversation, message: Message):
+        conv.messages.append(message)
+        self.dispatch_event(ClientEvent.ON_MESSAGE, conv=conv, message=message)
+        self.save_session()
     
     def process_message(self, data: dict, other_user: str):
         user_from = data["from"] if "from" in data else self.username
@@ -366,22 +393,24 @@ class Client(Emitter[ClientEvent]):
         self.session.last_recieved = datetime.datetime.now()
         
         # process the message
+        header = double_ratchet.Header.decode(bytes.fromhex(data["header"]))
         ciphertext = bytes.fromhex(data["body"])
-        text = aead.decrypt(conv.shared_key, conv.associated_data, ciphertext)
-        if text is None:
+        raw_text = double_ratchet.RatchetDecrypt(conv.state, header, ciphertext, conv.associated_data)
+        
+        if raw_text is None:
             raise Exception("AEAD failed") # TODO: display warning or something
         
-        text = text.decode("utf-8")
+        text = raw_text.decode("utf-8")
 
+        # TODO: put message into correct place
+        # need to tie order to messages incase they are recieved incorrectly
         message = Message(
             user_from=user_from,
             message=text,
             timestamp=datetime.datetime.fromisoformat(data["timestamp"])
         )
 
-        conv.messages.append(message)
-        self.dispatch_event(ClientEvent.ON_MESSAGE, conv=conv, message=message)
-        self.save_session()
+        self.add_message(conv, message)
     
     def fetch_messages_after(self, timestamp: datetime.datetime):
         self.send_packet({
@@ -394,7 +423,10 @@ class Client(Emitter[ClientEvent]):
         self.save_session()
         for username, new_messages in data["messages"].items():
             for message in new_messages:
-                self.process_message(message, other_user=username)
+                if message["from"] != self.username:
+                    self.process_message(message, other_user=username)
+                else:
+                    print("Received a message from ourselves so cannot decrypt")
     
     def send_packet(self, data):
         # format: length.to_bytes(8, "little") <data>
