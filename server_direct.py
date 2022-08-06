@@ -4,12 +4,12 @@ import socket
 import threading
 import time
 from typing import *
-from dataclasses import dataclass
 from locked_resource import locked_resource
 import datetime
 import logging
 import json
 import uuid
+import traceback
 
 DATETIME_FMT = "%Y-%m-%d %H:%M:%S"
 FORMAT = '[%(asctime)s %(levelname)s %(module)s:%(lineno)d] %(message)s'
@@ -271,11 +271,12 @@ class Server:
 
         except Exception as e:
             logger.error(f"Error on server thread: {e}")
+            traceback.print_exc()
             pass
 
     def close(self):
         self.stop_event.set()
-        for client in self.clients.values():
+        for client in list(self.clients.values()):
             client.send_packet({"type": "server_close"})
             client.close()
         

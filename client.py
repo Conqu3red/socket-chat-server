@@ -3,12 +3,11 @@ import datetime
 import socket
 import threading
 import json
-from signal_protocol import xed25519, kdf, double_ratchet
-from signal_protocol.aead import AEAD_AES_128_CBC_HMAC_SHA_256 as aead
-from signal_protocol.curve25519 import x25519
+from signal_protocol import double_ratchet, x3dh
 from typing import *
 from events import Emitter
 from enum import Enum
+import traceback
 
 APP_INFO = "TestApp"
 
@@ -37,70 +36,45 @@ class Message:
 @dataclass
 class Conversation:
     username: str
-    ik: bytes # Identity public key
-    ek: bytes # Ephemeral public key
-    opk_id: Optional[str]
-    associated_data: bytes
-    other_user_has_key: bool # True if other user has been sent key in any way
-    state: double_ratchet.State
+    x3dh_state: x3dh.ProtocolState
+    ratchet_state: double_ratchet.State
     messages: List[Message]
 
     @classmethod
     def from_json(cls, data: dict):
         return cls(
             username=data["username"],
-            ik=bytes.fromhex(data["ik"]),
-            ek=bytes.fromhex(data["ek"]),
-            opk_id=data["opk_id"],
-            associated_data=bytes.fromhex(data["associated_data"]),
-            other_user_has_key=data["other_user_has_key"],
-            state=double_ratchet.State.from_json(data["state"]),
+            x3dh_state=x3dh.GlobalState.from_json(data["x3dh_state"]),
+            ratchet_state=double_ratchet.State.from_json(data["ratchet_state"]),
             messages=[Message.from_json(message) for message in data["messages"]]
         )
     
     def to_json(self):
         return {
             "username": self.username,
-            "ik": self.ik.hex(),
-            "ek": self.ek.hex(),
-            "opk_id": self.opk_id,
-            "associated_data": self.associated_data.hex(),
-            "other_user_has_key": self.other_user_has_key,
-            "state": self.state.to_json(),
+            "x3dh_state": self.x3dh_state.to_json(),
+            "ratchet_state": self.ratchet_state.to_json(),
             "messages": [message.to_json() for message in self.messages]
         }
 
 
 @dataclass
 class Session:
-    ik: x25519.X25519KeyPair # Identity key
-    spk: x25519.X25519KeyPair # Signed prekey
-    opks: Dict[int, x25519.X25519KeyPair] # One-time Prekeys
-    prekeys_generated: int # keeps track of total prekeys generated ever
+    state: x3dh.GlobalState
     conversations: List[Conversation]
     last_recieved: datetime.datetime
 
     @classmethod
     def from_json(cls, data: dict):
         return cls(
-            ik=x25519.X25519KeyPair.from_json(data["ik"]),
-            spk=x25519.X25519KeyPair.from_json(data["spk"]),
-            opks={
-                k: x25519.X25519KeyPair.from_json(v) for k, v in data["opks"]["keys"].items()
-            },
-            prekeys_generated=data["opks"]["prekeys_generated"],
+            state=x3dh.GlobalState.from_json(data["state"]),
             conversations=[Conversation.from_json(conv) for conv in data["conversations"]], # TODO: load conversations
             last_recieved=datetime.datetime.fromisoformat(data["last_recieved"])
         )
     
     def to_json(self) -> dict:
         return {
-            "ik": self.ik.to_json(),
-            "spk": self.spk.to_json(),
-            "opks": {
-                "keys": {k: v.to_json() for k, v in self.opks.items()},
-                "prekeys_generated": self.prekeys_generated
-            },
+            "state": self.state.to_json(),
             "conversations": [conv.to_json() for conv in self.conversations],
             "last_recieved": self.last_recieved.isoformat()
         }
@@ -108,17 +82,16 @@ class Session:
     @classmethod
     def create_session(cls, opk_count: int = 10):
         return cls(
-            ik=x25519.X25519KeyPair(),
-            spk=x25519.X25519KeyPair(),
-            opks={str(n): x25519.X25519KeyPair() for n in range(10)},
-            prekeys_generated=opk_count,
+            state=x3dh.GlobalState.create(opk_count=opk_count),
             conversations=[],
             last_recieved=datetime.datetime.min
         )
 
+
 class ClientEvent(Enum):
     NEW_CONVERSATION = "NEW_CONVERSATION"
     ON_MESSAGE = "ON_MESSAGE"
+
 
 class Client(Emitter[ClientEvent]):
     """ Outlines the implementation of an encrypted client """
@@ -169,14 +142,10 @@ class Client(Emitter[ClientEvent]):
     
     def publish_keys(self):
         """ Publishes the initial key-set to the server """
+        key_publish_data = x3dh.create_key_publishing_bundle(self.session.state)
         self.send_packet({
             "type": "publish_keys",
-            "ik": self.session.ik.pk.hex(),
-            "spk": self.session.spk.pk.hex(),
-            "prekey_sig": xed25519.sign(self.session.ik.sk, self.session.spk.pk).hex(),
-            "opks": {
-                identifier: key.pk.hex() for identifier, key in self.session.opks.items()
-            }
+            **key_publish_data.to_json()
         })
     
     def update_spk(self):
@@ -192,60 +161,22 @@ class Client(Emitter[ClientEvent]):
             "type": "get_prekey_bundle",
             "username": other_username
         })
-
-    def establish_shared_key_from_prekey_bundle(self, data: dict):
-        """ Establishes a shared key and associated data from a prekey bundle received upon request """
-        other_username = data["username"]
-        ik_other = bytes.fromhex(data["ik"])
-        spk_other = bytes.fromhex(data["spk"])
-        prekey_sig = bytes.fromhex(data["prekey_sig"])
-        opk_id = data["opk_id"]
-        opk = bytes.fromhex(data["opk"]) if data["opk"] else None
-        
-        # ephemeral key
-        ek = x25519.X25519KeyPair()
-
-        # validate prekey_signature
-        # TODO: abort if verification fails
-        assert xed25519.verify(ik_other, spk_other, prekey_sig) == True
-
-        # we are client a in this case
-        # DH1 = DH(IK_a, SPK_b)
-        dh1 = x25519.X25519(self.session.ik.sk, spk_other)
-
-        # DH2 = DH(EK_a, IK_b)
-        dh2 = x25519.X25519(ek.sk, ik_other)
-
-        # DH3 = DH(EK_a, SPK_b)
-        dh3 = x25519.X25519(ek.sk, spk_other)
-
-        combined = dh1 + dh2 + dh3
-        
-        if opk_id is not None:
-            # DH4 = DH(EK_a, OPK_b)
-            dh4 = x25519.X25519(ek.sk, opk)
-            combined += dh4
-        
-        shared_key = kdf.KDF(combined, info=APP_INFO.encode("utf-8"))
-        associated_data = self.session.ik.pk + ik_other
-
-        print(f"Established shared key with {other_username}: {shared_key.hex()}")
-        return shared_key, associated_data, ek.pk
     
     def create_conversation_from_bundle(self, data: dict) -> Conversation:
         """ Initialise a conversation from a prekey bundle """
-        SK, AD, EK = self.establish_shared_key_from_prekey_bundle(data)
+        prekey_bundle = x3dh.PrekeyBundle.from_json(data)
+        SK, protocol_state = x3dh.establish_protocol_state_from_bundle(
+            state=self.session.state,
+            bundle=prekey_bundle,
+            APP_INFO=APP_INFO
+        )
         other_username = data["username"]
         conv = Conversation(
             username=other_username,
-            ik=bytes.fromhex(data["ik"]),
-            ek=EK,
-            opk_id=data["opk_id"],
-            associated_data=AD,
-            other_user_has_key=False,
-            state = double_ratchet.ratchetInitAsFirstSender(
+            x3dh_state=protocol_state,
+            ratchet_state = double_ratchet.ratchetInitAsFirstSender(
                 SK=SK,
-                other_dh_public_key=bytes.fromhex(data["spk"])
+                other_dh_public_key=prekey_bundle.spk
             ),
             messages=[]
         )
@@ -268,9 +199,9 @@ class Client(Emitter[ClientEvent]):
             raise Exception("You have not established a conversation with this user")
         
         header, body = double_ratchet.RatchetEncrypt(
-            state = conv.state,
+            state = conv.ratchet_state,
             plaintext = message.encode("utf-8"),
-            AD = conv.associated_data
+            AD = conv.x3dh_state.associated_data
         )
         
         message_packet = {
@@ -280,14 +211,14 @@ class Client(Emitter[ClientEvent]):
             "body": body.hex(),
         }
 
-        if not conv.other_user_has_key:
-            message_packet["initiator"] = {
-                "ik": self.session.ik.pk.hex(),
-                "ek": conv.ek.hex(),
-                "opk_id": conv.opk_id,
-            }
-            # TODO: send with every message until we get a response
-            conv.other_user_has_key = True
+        if not conv.x3dh_state.received_response:
+            initiator = x3dh.InitiatorBundle(
+                ik=self.session.state.ik.pk,
+                ek=conv.x3dh_state.ek,
+                opk_id=conv.x3dh_state.opk_id
+            )
+            message_packet["initiator"] = initiator.to_json()
+            
 
         self.send_packet(message_packet)
 
@@ -304,63 +235,20 @@ class Client(Emitter[ClientEvent]):
         )
         self.save_session()
     
-    def get_opk_from_id_and_remove(self, opk_id: str) -> Optional[x25519.X25519KeyPair]:
-        if opk_id in self.session.opks:
-            return self.session.opks.pop(opk_id)
-        
-        raise Exception(f"Invalid One-time prekey id {opk_id!r}")
-    
-    def establish_shared_key_from_initiator(self, other_username: str, data: dict):
-        """ Establishes a shared key and associated data from an initiator message """
-        ik = self.session.ik.sk
-        ik_other = bytes.fromhex(data["ik"])
-        spk = self.session.spk.sk
-        ek = bytes.fromhex(data["ek"])
-        opk_id = data["opk_id"]
-        if opk_id is None:
-            print(f"WARN: communication with {other_username} has no one-time prekey!")
-            opk = None
-        else:
-            opk = self.get_opk_from_id_and_remove(opk_id).sk
-            if opk is None:
-                raise Exception(f"Could not find one-time prekey of ID {opk_id!r}")
-
-        # we are client b in this case
-        # DH1 = DH(IK_a, SPK_b)
-        dh1 = x25519.X25519(spk, ik_other)
-
-        # DH2 = DH(EK_a, IK_b)
-        dh2 = x25519.X25519(ik, ek)
-
-        # DH3 = DH(EK_a, SPK_b)
-        dh3 = x25519.X25519(spk, ek)
-
-        combined = dh1 + dh2 + dh3
-        
-        if opk_id is not None:
-            # DH4 = DH(EK_a, OPK_b)
-            dh4 = x25519.X25519(opk, ek)
-            combined += dh4
-        
-        shared_key = kdf.KDF(combined, info=APP_INFO.encode("utf-8"))
-        associated_data = ik_other + self.session.ik.pk
-
-        print(f"Established shared key with {other_username}: {shared_key.hex()}")
-        return shared_key, associated_data, ek
-    
     def create_conversation_from_initiator(self, other_username: str, data: dict) -> Conversation:
         """ Initialise a conversation from an initiator message """
-        SK, AD, EK = self.establish_shared_key_from_initiator(other_username, data)
+        initiator = x3dh.InitiatorBundle.from_json(data)
+        SK, protocol_bundle = x3dh.establish_protocol_state_from_initiator(
+            state=self.session.state,
+            initiator=initiator,
+            APP_INFO=APP_INFO
+        )
         conv = Conversation(
             username=other_username,
-            ik=bytes.fromhex(data["ik"]),
-            ek=EK,
-            opk_id=data["opk_id"],
-            associated_data=AD,
-            other_user_has_key=True, # they sent us initiator, so they must have the key
-            state = double_ratchet.ratchetInitAsFirstReciever(
+            x3dh_state=protocol_bundle,
+            ratchet_state = double_ratchet.ratchetInitAsFirstReciever(
                 SK=SK,
-                dh_key_pair=self.session.spk
+                dh_key_pair=self.session.state.spk
             ),
             messages=[]
         )
@@ -376,7 +264,7 @@ class Client(Emitter[ClientEvent]):
         self.save_session()
     
     def process_message(self, data: dict, other_user: str):
-        user_from = data["from"] if "from" in data else self.username
+        user_from = data["from"]
         conv = self.find_conversation_by_username(other_user)
         if conv is None:
             if "initiator" in data:
@@ -386,14 +274,17 @@ class Client(Emitter[ClientEvent]):
                 raise Exception("Recieved first message without an initialiser")
         
         self.session.last_recieved = datetime.datetime.now()
+
+        if conv.x3dh_state.received_response == False:
+            conv.x3dh_state.received_response = True
         
         # process the message
         header = double_ratchet.Header.decode(bytes.fromhex(data["header"]))
         ciphertext = bytes.fromhex(data["body"])
-        raw_text = double_ratchet.RatchetDecrypt(conv.state, header, ciphertext, conv.associated_data)
+        raw_text = double_ratchet.RatchetDecrypt(conv.ratchet_state, header, ciphertext, conv.x3dh_state.associated_data)
         
         if raw_text is None:
-            raise Exception("AEAD failed") # TODO: display warning or something
+            raise Exception("Ratchet Decryption failed, message may have been tampered with.") # TODO: display warning or something
         
         text = raw_text.decode("utf-8")
 
@@ -470,6 +361,7 @@ class Client(Emitter[ClientEvent]):
 
         except Exception as e:
             print("err", repr(e))
+            traceback.print_exc()
             if self.stop_event.is_set():
                 print("Disconnected, closing...")
             else:
