@@ -109,6 +109,7 @@ class AEAD:
 
         if expected_T != T:
             # Invalid A and C
+            print("Invalid A and C")
             return None
         
         # A and C are considered valid
@@ -123,6 +124,7 @@ class AEAD:
 
             return P
         else:
+            print(f"Invalid padding length {padding_length}")
             # padding was invalid, abort
             return None
 

@@ -150,6 +150,8 @@ def RatchetEncrypt(state: State, plaintext: bytes, AD: bytes):
     Returns the header and ciphertext
     """
     state.CKs, mk = kdf.KDF_CK(state.CKs)
+    print("Send Ratchet:")
+    print(f"    CKs: {state.CKs.hex()}")
     header = create_header(state.DHs, state.PN, state.Ns)
     state.Ns += 1
     return header, aead.encrypt(mk, plaintext, AD + header.encode())
@@ -170,8 +172,10 @@ def RatchetDecrypt(state: State, header: Header, ciphertext: bytes, AD: bytes) -
     # store skipped keys for this ratchet
     SkipMessageKeys(state, header.n)
     state.CKr, mk = kdf.KDF_CK(state.CKr)
+    print("Recieve Ratchet:")
+    print(f"    CKr: {state.CKr.hex()}")
     state.Nr += 1
-    return aead.decrypt(mk, ciphertext, AD + header.encode())
+    return aead.decrypt(mk, A = AD + header.encode(), C = ciphertext)
 
 
 def TrySkippedMessageKeys(state: State, header: Header, ciphertext: bytes, AD: bytes):
@@ -179,7 +183,7 @@ def TrySkippedMessageKeys(state: State, header: Header, ciphertext: bytes, AD: b
     if (header.dh, header.n) in state.MKSKIPPED:
         mk = state.MKSKIPPED[header.dh, header.n]
         del state.MKSKIPPED[header.dh, header.n]
-        return aead.decrypt(mk, ciphertext, AD + header.encode())
+        return aead.decrypt(mk, A = AD + header.encode(), C = ciphertext)
     else:
         return None
 
@@ -202,3 +206,7 @@ def DHRatchet(state: State, header: Header):
     state.RK, state.CKr = kdf.KDF_RK(state.RK, x25519.X25519(state.DHs.sk, state.DHr))
     state.DHs = x25519.X25519KeyPair()
     state.RK, state.CKs = kdf.KDF_RK(state.RK, x25519.X25519(state.DHs.sk, state.DHr))
+    print("DH Ratchet:")
+    print(f"     dh: {x25519.X25519(state.DHs.sk, state.DHr).hex()}")
+    print(f"    CKr: {state.CKr.hex()}")
+    print(f"    CKs: {state.CKs.hex()}")

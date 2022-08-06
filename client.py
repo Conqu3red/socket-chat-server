@@ -40,7 +40,6 @@ class Conversation:
     ik: bytes # Identity public key
     ek: bytes # Ephemeral public key
     opk_id: Optional[str]
-    shared_key: bytes
     associated_data: bytes
     other_user_has_key: bool # True if other user has been sent key in any way
     state: double_ratchet.State
@@ -53,7 +52,6 @@ class Conversation:
             ik=bytes.fromhex(data["ik"]),
             ek=bytes.fromhex(data["ek"]),
             opk_id=data["opk_id"],
-            shared_key=bytes.fromhex(data["shared_key"]),
             associated_data=bytes.fromhex(data["associated_data"]),
             other_user_has_key=data["other_user_has_key"],
             state=double_ratchet.State.from_json(data["state"]),
@@ -66,7 +64,6 @@ class Conversation:
             "ik": self.ik.hex(),
             "ek": self.ek.hex(),
             "opk_id": self.opk_id,
-            "shared_key": self.shared_key.hex(),
             "associated_data": self.associated_data.hex(),
             "other_user_has_key": self.other_user_has_key,
             "state": self.state.to_json(),
@@ -244,7 +241,6 @@ class Client(Emitter[ClientEvent]):
             ik=bytes.fromhex(data["ik"]),
             ek=EK,
             opk_id=data["opk_id"],
-            shared_key=SK,
             associated_data=AD,
             other_user_has_key=False,
             state = double_ratchet.ratchetInitAsFirstSender(
@@ -360,7 +356,6 @@ class Client(Emitter[ClientEvent]):
             ik=bytes.fromhex(data["ik"]),
             ek=EK,
             opk_id=data["opk_id"],
-            shared_key=SK,
             associated_data=AD,
             other_user_has_key=True, # they sent us initiator, so they must have the key
             state = double_ratchet.ratchetInitAsFirstReciever(
