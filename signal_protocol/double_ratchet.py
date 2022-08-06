@@ -189,6 +189,7 @@ def TrySkippedMessageKeys(state: State, header: Header, ciphertext: bytes, AD: b
 
 
 def SkipMessageKeys(state: State, until: int):
+    """ Store skipped message keys """
     if state.Nr + MAX_SKIP < until:
         raise Exception("Skipped too many message keys")
     if state.CKr != None:
@@ -203,8 +204,10 @@ def DHRatchet(state: State, header: Header):
     state.Ns = 0
     state.Nr = 0
     state.DHr = header.dh
+    # Generate Chain Key for receiving
     state.RK, state.CKr = kdf.KDF_RK(state.RK, x25519.X25519(state.DHs.sk, state.DHr))
     state.DHs = x25519.X25519KeyPair()
+    # Generate Chain Key for sending
     state.RK, state.CKs = kdf.KDF_RK(state.RK, x25519.X25519(state.DHs.sk, state.DHr))
     print("DH Ratchet:")
     print(f"     dh: {x25519.X25519(state.DHs.sk, state.DHr).hex()}")
