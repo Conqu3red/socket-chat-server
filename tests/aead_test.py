@@ -1,3 +1,4 @@
+import path_hack
 import os
 from signal_protocol.aead import AEAD_AES_128_CBC_HMAC_SHA_256 as aead
 

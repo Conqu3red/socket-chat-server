@@ -1,3 +1,4 @@
+import path_hack
 from signal_protocol.curve25519.x25519 import X25519KeyPair
 from signal_protocol.dh import x25519_gen_shared_key
 

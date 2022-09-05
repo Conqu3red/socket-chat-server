@@ -1,3 +1,4 @@
+import path_hack
 from signal_protocol.curve25519.curve25519 import scalar_mult
 from signal_protocol.curve25519.x25519 import X25519, X25519KeyPair
 
