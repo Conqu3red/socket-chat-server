@@ -44,7 +44,7 @@ class Conversation:
     def from_json(cls, data: dict):
         return cls(
             username=data["username"],
-            x3dh_state=x3dh.GlobalState.from_json(data["x3dh_state"]),
+            x3dh_state=x3dh.ProtocolState.from_json(data["x3dh_state"]),
             ratchet_state=double_ratchet.State.from_json(data["ratchet_state"]),
             messages=[Message.from_json(message) for message in data["messages"]]
         )
