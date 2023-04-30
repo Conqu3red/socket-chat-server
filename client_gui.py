@@ -4,7 +4,7 @@ import threading
 from typing import *
 from client import *
 
-ip = "192.168.1.12"
+ip = "192.168.1.7"
 port = 6777
 
 sg.theme('DarkAmber')  # Add a touch of color
@@ -47,7 +47,7 @@ def get_server():
     window.close()
 
 
-class GuiClient(Client):
+class GuiClient:
     def __init__(self):
         r = get_server()
         if r is not None:
