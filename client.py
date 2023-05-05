@@ -10,6 +10,17 @@ from enum import Enum
 import traceback
 from socket_utils import *
 
+DATETIME_FMT = "%Y-%m-%d %H:%M:%S"
+FORMAT = '%(asctime)s %(module)s:%(lineno)d %(name)s[%(process)d] %(levelname)s %(message)s'
+
+try:
+    import coloredlogs
+    coloredlogs.install(fmt=FORMAT, datefmt=DATETIME_FMT, level=logging.DEBUG)
+except ImportError:
+    logging.basicConfig(format=FORMAT, datefmt=DATETIME_FMT, level=logging.DEBUG)
+
+logger = logging.getLogger('client')
+
 APP_INFO = "TestApp"
 
 @dataclass
@@ -123,7 +134,7 @@ class Client(Emitter[ClientEvent]):
     def get_session_or_create(self) -> Session:
         try:
             with open(self.DATA_FILE, "r") as f:
-                print("Loaded existing session.")
+                logger.info("Loaded existing session.")
                 return Session.from_json(json.load(f))
         except (OSError, json.JSONDecodeError) as e:
             return Session.create_session()
@@ -315,7 +326,7 @@ class Client(Emitter[ClientEvent]):
                 if message["from"] != self.username:
                     self.process_message(message, other_user=username)
                 else:
-                    print("Received a message from ourselves so cannot decrypt")
+                    logger.error("Received a message from ourselves so cannot decrypt")
     
     def send_packet(self, data):
         send_packet(self.socket, data)
@@ -339,15 +350,15 @@ class Client(Emitter[ClientEvent]):
                 try:
                     data = self.recv_packet()
                 except ClosedSocket:
-                    print(f"Connection closed, Exiting...")
+                    logger.info(f"Connection closed, Exiting...")
                     break
                 
-                print(f"Received: \n{json.dumps(data, indent=2)}")
+                logger.debug(f"Received: \n{json.dumps(data, indent=2)}")
                 #if data["type"] == "message_forward":
                 #    self.receive_message(data)
 
                 if data["type"] == "disconnect":
-                    print(f"Disconnected from server, reason: {data['reason']}")
+                    logger.info(f"Disconnected from server, reason: {data['reason']}")
                 
                 elif data["type"] == "request_keys":
                     self.publish_keys()
@@ -363,15 +374,15 @@ class Client(Emitter[ClientEvent]):
                     self.create_conversation_from_bundle(data)
 
                 else:
-                    print(f"Unimplemented message type {data['type']}")
+                    logger.critical(f"Unimplemented message type {data['type']}")
 
         except Exception as e:
-            print("err", repr(e))
+            logger.critical("err", repr(e))
             traceback.print_exc()
             if self.stop_event.is_set():
-                print("Disconnected, closing...")
+                logger.info("Disconnected, closing...")
             else:
-                print("Lost connection, closing...")
+                logger.info("Lost connection, closing...")
             self.stop_event.set()
 
         finally:

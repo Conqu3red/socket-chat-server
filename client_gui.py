@@ -3,6 +3,9 @@ import PySimpleGUI as sg
 import threading
 from typing import *
 from client import *
+import logging
+
+logger = logging.getLogger("ui")
 
 ip = "192.168.1.190"
 port = 6777
@@ -61,7 +64,7 @@ class GuiClient:
         self.thread.daemon = True
         self.thread.start()
         
-        print("Client opened.")
+        logger.info("Client opened.")
 
         self.window = sg.Window("Chat App", layout)
         self.window.finalize()
@@ -141,7 +144,6 @@ class GuiClient:
 
 
             if event == sg.WIN_CLOSED or event == 'Cancel':  # if user closes window or clicks cancel
-                print(values)
                 break
             if event == "Negotiate":
                 self.negotiate_key(values["n_user"])

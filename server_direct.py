@@ -9,12 +9,17 @@ import uuid
 import traceback
 import sqlite3
 from dataclasses import dataclass
-import coloredlogs
 from socket_utils import *
 
 DATETIME_FMT = "%Y-%m-%d %H:%M:%S"
 FORMAT = '%(asctime)s %(module)s:%(lineno)d %(name)s[%(process)d] %(levelname)s %(message)s'
-coloredlogs.install(fmt=FORMAT, datefmt=DATETIME_FMT, level=logging.DEBUG)
+
+try:
+    import coloredlogs
+    coloredlogs.install(fmt=FORMAT, datefmt=DATETIME_FMT, level=logging.DEBUG)
+except ImportError:
+    logging.basicConfig(format=FORMAT, datefmt=DATETIME_FMT, level=logging.DEBUG)
+
 logger = logging.getLogger('server')
 
 DATABASE = "server_db.db"
