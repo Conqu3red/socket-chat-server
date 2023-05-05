@@ -1,6 +1,7 @@
-import contextlib
 import os
 import socket
+import select
+import errno
 import threading
 import time
 from typing import *
@@ -208,32 +209,84 @@ class Db:
         return [self.Message(*m) for m in messages]
 
 
-class CloseListener:
+class ClosedSocket(Exception):
     pass
 
 
 CONVERSATION_FILE = "data/conversations/{0}.json"
 USER_FILE = "data/users/{0}.json"
 
-def send_packet(socket, data):
+def send_packet(sock: socket.socket, data):
     # format: length.to_bytes(8, "little") <data>
-    if socket is None:
+    if sock is None:
         raise Exception("Failed to send packet, socket is None.")
     
     encoded = json.dumps(data).encode("utf-8")
-    socket.sendall(len(encoded).to_bytes(8, "little") + encoded)
+    content = len(encoded).to_bytes(8, "little") + encoded
+    data_size = len(content)
 
-def recv_packet(socket):
-    packet_length = int.from_bytes(socket.recv(8), "little")
-    data = json.loads(socket.recv(packet_length).decode("utf-8"))
+    logger.debug(f"Send: Sending {data_size} bytes")
+    
+    total_sent = 0
+    while len(content):
+        try:
+            sent = sock.send(content)
+            total_sent += sent
+            content = content[sent:]
+            logger.debug(f"Send: Sent {sent} bytes")
+        except OSError as e:
+            if e.errno != socket.EAGAIN and e.errno != socket.EWOULDBLOCK:
+                raise e
+            logger.debug(f"Send: Blocking, {len(content)} bytes remaining...")
+            r, w, x = select.select([], [sock], [sock]) # TODO: timeout
+            if x:
+                logger.debug("ERR", x)
+    
+    assert total_sent == data_size
+
+
+def recv_data(sock: socket.socket, length: int):
+    data = b""
+    bytes_left = length
+    logger.debug(f"Recv: Expecting {length} bytes")
+    while bytes_left > 0:
+        try:
+            recieved = sock.recv(bytes_left)
+            bytes_left -= len(recieved)
+            data += recieved
+            logger.debug(f"Recv: Recieved {len(recieved)} bytes")
+        except OSError as e:
+            if e.errno != socket.EAGAIN and e.errno != socket.EWOULDBLOCK:
+                raise e
+            logger.debug(f"Recv: Blocking, {bytes_left} bytes remaining...")
+            r, w, x = select.select([sock], [], [sock])
+            if x:
+                logger.debug("ERR", x)
+    
     return data
 
-def new_conversation_id():
+
+def recv_packet(sock: socket.socket):
+    packet_length = int.from_bytes(recv_data(sock, 8), "little")
+    data = json.loads(recv_data(sock, packet_length).decode("utf-8"))
+    return data
+
+
+def sock_accept(sock: socket.socket):
+    logger.debug(f"Accept: Waiting")
     while True:
-        id = str(uuid.uuid4())
-        file = CONVERSATION_FILE.format(id)
-        if not os.path.exists(file):
-            return file
+        try:
+            client_sock, addr = sock.accept()
+            logger.debug(f"Accept: Recieved connection {addr}")
+            yield client_sock, addr
+        except OSError as e:
+            if e.errno != socket.EAGAIN and e.errno != socket.EWOULDBLOCK:
+                raise e
+        
+            logger.debug(f"Accept: Blocking")
+            r, w, x = select.select([sock], [sock], [sock])
+            if x:
+                logger.debug("ERR", x)
 
 
 class ClientHandler:
@@ -249,17 +302,19 @@ class ClientHandler:
         try:
             send_packet(self.socket, data)
         except Exception as e:
-            logger.critical(f"Exception whilst trying to send packet from {self.username!r}: {e}")
-            self.close()
-
+            if not self.stop_event.is_set():
+                logger.critical(f"Exception whilst trying to send packet from {self.username!r}: {e}")
+                self.close()
 
     def recv_packet(self):
         try:
             return recv_packet(self.socket)
         except Exception as e:
-            logger.critical(f"Exception whilst trying to recieve packet from {self.username!r}: {e}")
-            self.close()
-            return CloseListener()
+            if not self.stop_event.is_set():
+                logger.critical(f"Exception whilst trying to recieve packet from {self.username!r}: {e}")
+                self.close()
+            
+            raise ClosedSocket()
     
     def listener(self):
         self.db = Db(DATABASE)
@@ -268,10 +323,9 @@ class ClientHandler:
             self.send_packet({"type": "request_keys"})
 
         while not self.server.stop_event.is_set() and not self.stop_event.is_set():
-            data = self.recv_packet()
-
-            if isinstance(data, CloseListener):
-                logger.debug(f"({self.username}) close packet")
+            try:
+                data = self.recv_packet()
+            except ClosedSocket:
                 return
             
             logger.debug(f"({self.username}) sent packet: \n{json.dumps(data, indent=2)}")
@@ -374,25 +428,19 @@ class ClientHandler:
         })
     
     def close(self):
-        self.stop_event.set()
-        self.socket.close()
-        self.server.clients.pop(self.username)
+        if not self.stop_event.is_set():
+            logger.info(f"Client terminated : {self.username}")
+            self.stop_event.set()
+            self.socket.close()
+            self.server.clients.pop(self.username)
 
 
 class Server:
-    KEY_FILE = "server_keys.json"
 
     def __init__(self, sock: socket.socket) -> None:
         self.clients: Dict[str, ClientHandler] = {}
         self.server_sock = sock
         self.stop_event = threading.Event() # TODO
-
-        try:
-            with open(self.KEY_FILE, "r") as f:
-                self.public_keys = json.load(f)
-
-        except (OSError, json.JSONDecodeError):
-            pass
 
     def loop(self):
         logger.info("Server started")
@@ -402,8 +450,12 @@ class Server:
         logger.info("Debugger initialised")
 
         try:
-            while not self.stop_event.is_set():
-                client_socket, client_address = self.server_sock.accept()
+            for client_socket, client_address in sock_accept(self.server_sock):
+                if self.stop_event.is_set():
+                    break
+                
+                # TODO: non blocking accept
+                client_socket.setblocking(False)
                 logger.debug("Connection")
 
                 initial_data = recv_packet(client_socket)
@@ -427,7 +479,6 @@ class Server:
     def close(self):
         self.stop_event.set()
         for client in list(self.clients.values()):
-            client.send_packet({"type": "server_close"})
             client.close()
         
         self.clients.clear()
@@ -438,6 +489,7 @@ def create_server(host: str, port: int):
 
     s = socket.socket()
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.setblocking(False)
     s.bind((host, port))
     s.listen(5)
 
