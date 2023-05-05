@@ -4,7 +4,7 @@ import threading
 from typing import *
 from client import *
 
-ip = "192.168.1.7"
+ip = "192.168.1.190"
 port = 6777
 
 sg.theme('DarkAmber')  # Add a touch of color
@@ -73,6 +73,7 @@ class GuiClient:
 
         self.capture_event(ClientEvent.NEW_CONVERSATION, self.on_new_conversation)
         self.capture_event(ClientEvent.ON_MESSAGE, self.on_message)
+        self.capture_event(ClientEvent.ON_CLOSE, self.on_close)
     
     def capture_event(self, event_type: ClientEvent, handler: Callable):
         self.client.register_handler(
@@ -119,7 +120,6 @@ class GuiClient:
     def add_message(self, message: Message):
         # TODO: display time
         self.window["output"].print(f"<{message.user_from}> {message.message}")
-        
     
     def on_message(self, conv: Conversation, message: Message):
         if self.currently_messaging == conv.username:
@@ -127,6 +127,9 @@ class GuiClient:
     
     def on_new_conversation(self, conv: Conversation):
         self.regen_conversation_list()
+    
+    def on_close(self):
+        self.window.close()
 
     def mainloop(self):
         while True:
@@ -138,6 +141,7 @@ class GuiClient:
 
 
             if event == sg.WIN_CLOSED or event == 'Cancel':  # if user closes window or clicks cancel
+                print(values)
                 break
             if event == "Negotiate":
                 self.negotiate_key(values["n_user"])

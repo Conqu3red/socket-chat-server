@@ -8,6 +8,7 @@ from typing import *
 from events import Emitter
 from enum import Enum
 import traceback
+from socket_utils import *
 
 APP_INFO = "TestApp"
 
@@ -91,6 +92,7 @@ class Session:
 class ClientEvent(Enum):
     NEW_CONVERSATION = "NEW_CONVERSATION"
     ON_MESSAGE = "ON_MESSAGE"
+    ON_CLOSE = "ON_CLOSE"
 
 
 class Client(Emitter[ClientEvent]):
@@ -132,6 +134,7 @@ class Client(Emitter[ClientEvent]):
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.connect((server_ip, server_port))
+        self.socket.setblocking(False) # after connection
 
         # send initial packet
         # There is no client authentication, this is just a POC for X3DH
@@ -315,17 +318,17 @@ class Client(Emitter[ClientEvent]):
                     print("Received a message from ourselves so cannot decrypt")
     
     def send_packet(self, data):
-        # format: length.to_bytes(8, "little") <data>
-        if self.socket is None:
-            raise Exception("Failed to send packet, socket is None.")
-        
-        encoded = json.dumps(data).encode("utf-8")
-        self.socket.sendall(len(encoded).to_bytes(8, "little") + encoded)
+        send_packet(self.socket, data)
 
     def recv_packet(self):
-        packet_length = int.from_bytes(self.socket.recv(8), "little")
-        data = json.loads(self.socket.recv(packet_length).decode("utf-8"))
-        return data
+        try:
+            return recv_packet(self.socket)
+        except Exception as e:
+            if not self.stop_event.is_set():
+                logger.critical(f"Exception whilst trying to recieve packet: {e}")
+                self.stop_event.set()
+            
+            raise ClosedSocket()
 
     def socket_handler(self):
         try:
@@ -333,14 +336,17 @@ class Client(Emitter[ClientEvent]):
             self.fetch_messages_after(self.session.last_recieved)
             
             while not self.stop_event.is_set():
-                data = self.recv_packet()
+                try:
+                    data = self.recv_packet()
+                except ClosedSocket:
+                    print(f"Connection closed, Exiting...")
+                    break
+                
                 print(f"Received: \n{json.dumps(data, indent=2)}")
                 #if data["type"] == "message_forward":
                 #    self.receive_message(data)
-                if data["type"] == "server_close":
-                    print(f"Server closed.")
 
-                elif data["type"] == "disconnect":
+                if data["type"] == "disconnect":
                     print(f"Disconnected from server, reason: {data['reason']}")
                 
                 elif data["type"] == "request_keys":
@@ -367,3 +373,6 @@ class Client(Emitter[ClientEvent]):
             else:
                 print("Lost connection, closing...")
             self.stop_event.set()
+
+        finally:
+            self.dispatch_event(ClientEvent.ON_CLOSE)
