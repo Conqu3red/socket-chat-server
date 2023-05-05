@@ -358,7 +358,8 @@ class Client(Emitter[ClientEvent]):
                 #    self.receive_message(data)
 
                 if data["type"] == "disconnect":
-                    logger.info(f"Disconnected from server, reason: {data['reason']}")
+                    logger.info(f"Disconnected from server, reason: '{data['reason']}'")
+                    break
                 
                 elif data["type"] == "request_keys":
                     self.publish_keys()

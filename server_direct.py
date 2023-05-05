@@ -354,7 +354,10 @@ class ClientHandler:
         if not self.stop_event.is_set():
             logger.info(f"Client terminated : {self.username}")
             self.stop_event.set()
-            self.socket.close()
+            try:
+                self.socket.close()
+            except:
+                pass
             self.server.clients.pop(self.username)
 
 
@@ -395,13 +398,16 @@ class Server:
                 t.start()
 
         except Exception as e:
-            logger.error(f"Error on server thread: {e}")
-            traceback.print_exc()
-            pass
+            if not self.stop_event.is_set():
+                logger.error(f"Error on server thread: {e}")
+                traceback.print_exc()
+            else:
+                logger.info("Server Listener exited.")
 
     def close(self):
         self.stop_event.set()
         for client in list(self.clients.values()):
+            client.send_packet({"type": "disconnect", "reason": "Server Closed"})
             client.close()
         
         self.clients.clear()
